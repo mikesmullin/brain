@@ -1,0 +1,22 @@
+{
+  "name": "brain",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A CWD-local knowledge-graph brain: flattened Markdown/YAML entities, ECS-style ontology schema, pglite+pgvector hybrid search, and agl-ai microagents. Successor to `ontology` (v1), inspired by gbrain.",
+  "main": "src/cli.coffee",
+  "bin": {
+    "brain": "./bin/brain.mjs"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.2.17",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agl-ai": "link:agl-ai",
+    "bun-coffeescript": "^1.0.3",
+    "js-yaml": "^4.1.1"
+  },
+  "keywords": ["ontology", "knowledge-graph", "pglite", "pgvector", "microagent", "bun", "coffeescript", "brain"],
+  "license": "MIT"
+}

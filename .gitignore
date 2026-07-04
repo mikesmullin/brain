@@ -1,0 +1,9 @@
+# dependencies
+node_modules/
+
+# pglite data dir (rebuildable artifact — never committed; regenerated from .md on reindex)
+.brain/pgdata/
+
+# scratch
+*.log
+tmp/

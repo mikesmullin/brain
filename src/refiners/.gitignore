@@ -1,0 +1,4 @@
+# proprietary/dataset-specific refiners are NOT committed to the tool repo;
+# define them per-cwd in <cwd>/refiner/<Class>.coffee (or drop global ones here, gitignored)
+*
+!.gitignore

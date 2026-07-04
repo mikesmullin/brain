@@ -1,0 +1,4 @@
+# dataset-specific component method modules are NOT committed to the tool repo;
+# define them per-cwd in <cwd>/components/<Component>.coffee (or drop global ones here, gitignored)
+*
+!.gitignore
