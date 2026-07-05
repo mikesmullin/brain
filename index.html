@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>brain — Documentation</title>
+<meta name="description" content="brain — a cwd-local knowledge-graph for agents. Typed Markdown entities, an ECS ontology, pglite hybrid search, deterministic graph traversal, and MCP tools. The write → maintain → retrieve → use memory lifecycle, made concrete.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- mobile topbar -->
+<div class="topbar">
+  <span class="brand">🧠 brain</span>
+  <button id="navToggle">☰ Menu</button>
+</div>
+
+<div class="layout">
+
+  <!-- ============================ SIDEBAR ============================ -->
+  <aside class="sidebar" id="sidebar">
+    <a class="logo-mini" href="#top"><span class="dot">🧠</span> <b>brain <span>docs</span></b></a>
+
+    <div class="nav-group">
+      <div class="nav-title">Start here</div>
+      <a class="nav-link" href="#top">Overview</a>
+      <a class="nav-link" href="#why">Why memory, not history</a>
+      <a class="nav-link" href="#lifecycle">The memory lifecycle</a>
+      <a class="nav-link" href="#layers">Facts → graph → ontology</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">Get going</div>
+      <a class="nav-link" href="#quickstart">Quick start</a>
+      <a class="nav-link" href="#first-brain">Build your first brain</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">The model</div>
+      <a class="nav-link" href="#slugs">Slugs &amp; files</a>
+      <a class="nav-link" href="#tbox">T-box: the schema</a>
+      <a class="nav-link" href="#abox">A-box: the instances</a>
+      <a class="nav-link" href="#validate">Validation &amp; lint</a>
+      <a class="nav-link" href="#idfield">Canonical ids</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">Growing the graph</div>
+      <a class="nav-link" href="#ingest">Bulk ingest</a>
+      <a class="nav-link" href="#refiners">Refiners</a>
+      <a class="nav-link" href="#components">Component methods</a>
+      <a class="nav-link" href="#wikilinks">Wiki-links</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">Asking questions</div>
+      <a class="nav-link" href="#query">Five query modes</a>
+      <a class="nav-link" href="#search">search</a>
+      <a class="nav-link" href="#think">think</a>
+      <a class="nav-link" href="#ontology">ontology</a>
+      <a class="nav-link" href="#graph">graph</a>
+      <a class="nav-link" href="#graphql">graphql</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">Capstone</div>
+      <a class="nav-link" href="#mcp">Serving agents over MCP</a>
+      <a class="nav-link" href="#architecture">Reference architecture</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-title">Reference</div>
+      <a class="nav-link" href="#layout">Layout &amp; config</a>
+      <a class="nav-link" href="#cli">CLI cheat-sheet</a>
+      <a class="nav-link" href="#reading">Further reading</a>
+    </div>
+  </aside>
+
+  <!-- ============================ CONTENT ============================ -->
+  <main class="content">
+  <div class="wrap" id="top">
+
+    <!-- ------------------------------ HERO ------------------------------ -->
+    <div class="hero">
+      <img class="logo" src="brain-logo.png" alt="brain">
+      <p class="tagline">A knowledge graph that lives in <span class="g">your repo</span> —<br>typed, searchable, and hard to <span class="b">corrupt</span>.</p>
+      <p class="sub">Pile enough notes, docs, and facts into a folder and eventually you want to <em>ask questions</em> of them — "which on-call engineer supports the payments service?" — not just grep for keywords. <b>brain</b> stores a typed knowledge graph as plain Markdown on disk, validates every write against a schema, and lets you search, traverse, and reason over it from the CLI or over MCP.</p>
+      <div class="cta">
+        <a class="btn green" href="#quickstart">🚀 Quick start</a>
+        <a class="btn blue" href="#first-brain">🧩 Build your first brain</a>
+        <a class="btn ghost" href="#why">📖 Why it exists</a>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="align-items:center; margin-top:24px;">
+      <div>
+        <p class="lead">A vector store hands back fuzzy text with no structure. A raw LLM agent let loose on your files invents duplicates and schema-invalid junk. A hosted knowledge base drags your data into someone else's cloud. You end up with either <strong>no structure</strong> or <strong>no trust</strong>.</p>
+        <p><b>brain</b> gives you both. Structure comes from an <a href="#tbox">entity-component-system ontology</a>; trust comes from the fact that <strong>every write — CLI <em>or</em> MCP — is validated against that schema</strong>, so the graph can't drift into inconsistency. Queries run against an embedded <a href="https://pglite.dev">pglite</a> index rebuilt from the Markdown files, giving you hybrid vector + keyword search, deterministic graph traversal, and grounded LLM synthesis.</p>
+      </div>
+      <div style="justify-self:center; width:100%;">
+        <div class="facts">
+          <h4>Brain Facts</h4>
+          <div class="row big"><span>State</span><b>plain Markdown on disk</b></div>
+          <div class="row"><span>Structure</span><b>ECS ontology (T-box)</b></div>
+          <div class="row"><span>Every write</span><b>schema-validated</b></div>
+          <div class="row"><span>Index</span><b>pglite + pgvector</b></div>
+          <div class="row"><span>Retrieval</span><b>hybrid + graph + LLM</b></div>
+          <div class="row"><span>Agents</span><b>typed tools over MCP</b></div>
+          <div class="row"><span>Runtime</span><b>Bun + CoffeeScript</b></div>
+          <div class="row big"><span>Your data leaves the machine?</span><b>never</b></div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="div">
+
+    <!-- ============================== WHY =============================== -->
+    <section id="why">
+      <h2><span class="bullet"></span>Why memory, not history <a class="anchor" href="#why">#</a></h2>
+      <p class="kicker">Foundations · the problem brain solves</p>
+      <p>Many "agent memory" systems really mean one of two simpler things: a longer transcript stuffed into the prompt, or retrieval over old messages. Neither is enough. <strong>Conversation history is expensive, noisy, and transient</strong> — it holds raw events, not durable abstractions.</p>
+      <div class="callout why"><p><span class="lbl">The thesis.</span> Long-term memory is not a bigger context window. It is a <em>separate subsystem</em> with its own write, read, and maintenance logic. <b>brain</b> is that subsystem — infrastructure, not a chatbot feature.</p></div>
+
+      <p>A durable memory layer must do more than "store facts somewhere." It needs at least five capabilities:</p>
+      <div class="grid cols-3">
+        <div class="card"><h4>① Persist</h4><p class="muted">Survive across sessions and workflows — here, as git-tracked files.</p></div>
+        <div class="card"><h4>② Compress</h4><p class="muted">Turn raw conversation into stable, typed abstractions.</p></div>
+        <div class="card"><h4>③ Retrieve</h4><p class="muted">Surface the <em>right</em> memory at the right time.</p></div>
+        <div class="card"><h4>④ Mutate</h4><p class="muted">Update and merge when new evidence arrives — no junk drawer.</p></div>
+        <div class="card"><h4>⑤ Ground</h4><p class="muted">Shape future answers and tool calls in what was remembered.</p></div>
+        <div class="card"><h4>Without them…</h4><p class="muted">No mutation → a junk drawer. No grounding → an unused archive. No compression → just another transcript.</p></div>
+      </div>
+
+      <h3>Why naive memory drifts and bloats</h3>
+      <p>Append-everything systems fail in three predictable ways. brain is designed against each:</p>
+      <table>
+        <thead><tr><th>Failure mode</th><th>What goes wrong</th><th>brain's answer</th></tr></thead>
+        <tbody>
+          <tr><td>Append-only bloat</td><td>Every candidate fact is stored forever.</td><td>Canonical ids + <a href="#refiners">refiners</a> merge duplicates into one record.</td></tr>
+          <tr><td>Contradiction drift</td><td>Stale facts stay live after they're disproven.</td><td>Writes are upserts through a validated accessor — the current best value wins.</td></tr>
+          <tr><td>Low-signal recall</td><td>Retrieval returns technically-related but useless fragments.</td><td>Typed <a href="#graph">graph</a> hits resolve exact relational facts <em>before</em> vector backfill.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- =========================== LIFECYCLE =========================== -->
+    <section id="lifecycle">
+      <h2><span class="bullet"></span>The memory lifecycle <a class="anchor" href="#lifecycle">#</a></h2>
+      <p class="kicker">Write → maintain → retrieve → use</p>
+      <p>The cleanest way to think about engineered memory is as a lifecycle. Every part of brain maps onto one stage of it:</p>
+      <table>
+        <thead><tr><th>Stage</th><th>Question</th><th>In brain</th></tr></thead>
+        <tbody>
+          <tr><td><b>Write</b></td><td>What is worth keeping?</td><td><code>set</code> / <code>new</code> / <code>ingest</code> extract typed entities</td></tr>
+          <tr><td><b>Maintain</b></td><td>Does this update or merge something older?</td><td><code>refine</code> resolves, renames, de-dupes, follows chains</td></tr>
+          <tr><td><b>Retrieve</b></td><td>Which memories matter for this turn?</td><td><code>search</code> / <code>graph</code> / <code>graphql</code> / <code>ontology</code></td></tr>
+          <tr><td><b>Use</b></td><td>How should they shape the answer?</td><td><code>think</code> and the <a href="#mcp">MCP</a> tools ground the model</td></tr>
+        </tbody>
+      </table>
+      <div class="callout note"><p><span class="lbl">This lifecycle is the spine of the docs.</span> The sections below walk it in order — first how memory is <em>written</em> and <em>structured</em>, then how it is <em>maintained</em>, then the five ways it is <em>retrieved</em>, and finally how it is <em>used</em> by an agent over MCP.</p></div>
+    </section>
+
+    <!-- ============================= LAYERS ============================ -->
+    <section id="layers">
+      <h2><span class="bullet"></span>Facts → graph → ontology <a class="anchor" href="#layers">#</a></h2>
+      <p class="kicker">Why a typed graph, and not just embeddings</p>
+      <p>Memory gets more capable in layers. Each layer is real; each has a ceiling that motivates the next.</p>
+      <ol class="steps">
+        <li><strong>Flat facts</strong> ("Jane prefers dark mode") are the first serious layer — great for preferences and identity, but they lose structure once the domain becomes relational.</li>
+        <li><strong>Vector search</strong> retrieves by <em>meaning</em>, not spelling: a query for "pet food" finds a note that says "small animal snacks." Essential, but it can't answer <em>structural</em> questions.</li>
+        <li><strong>A knowledge graph</strong> makes relationships first-class: <code>Person(jdoe) —[OWNS]→ System(alpha)</code> can be traversed, validated, and extended directly.</li>
+        <li><strong>An ontology</strong> gives that graph a formal, inspectable vocabulary — declaring which entity types, attributes, and relations are legal, then validating every write. "Only a <code>Person</code> can <code>OWN</code> a <code>System</code>."</li>
+      </ol>
+
+      <div class="callout why"><p><span class="lbl">Does the graph pay for itself?</span> On an adversarial benchmark seeded with stale facts and paraphrased "semantic poison," a full typed-graph brain hit <strong>~49% precision@5 vs ~11% for vector-RAG</strong> — a <strong>+31-point</strong> jump from the graph layer alone, while returning <strong>53% less</strong> total payload. Typed graph hits resolve exact relational and chronological facts <em>before</em> similarity ever runs — a task pure vectors structurally cannot do: knowing which fact is still current.</p></div>
+
+      <p><b>brain</b> is all four layers in one cwd-local tool: plain Markdown files (like a local-first wiki), a pglite vector index, a typed relation graph, and an ontology schema that every write is checked against.</p>
+    </section>
+
+    <hr class="div">
+
+    <!-- =========================== QUICKSTART ========================== -->
+    <section id="quickstart">
+      <h2><span class="bullet"></span>Quick start <a class="anchor" href="#quickstart">#</a></h2>
+      <p class="kicker">Install, initialize, and you have a brain</p>
+
+      <h3><span class="pill g">1</span> Install</h3>
+      <p>Built for <a href="https://bun.sh">Bun</a> with <a href="https://coffeescript.org/">CoffeeScript</a>. Link it from local disk:</p>
+      <pre><button class="copy">copy</button><code>bun install
+bun link              <span class="c"># register the global `brain` command</span></code></pre>
+      <p class="muted">The <code>agl-ai</code> dependency supplies embeddings + chat via GitHub Copilot (default), LM-Studio, or Ollama — no separate model server required.</p>
+
+      <h3><span class="pill g">2</span> Initialize a database</h3>
+      <p>Run <code>brain init</code> in any directory to scaffold a new store:</p>
+      <pre><button class="copy">copy</button><code>brain init</code></pre>
+      <pre><button class="copy">copy</button><code><span class="f">brain.yaml</span>               <span class="c"># per-db config (models, reranker, storage dirs)</span>
+<span class="f">db/</span>
+  <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entity instances — the A-box (git-tracked)</span>
+  <span class="f">schema.yaml</span>            <span class="c"># classes, attributes, relations — the T-box (git-tracked)</span>
+  <span class="f">pgdata/</span>                <span class="c"># pglite index — rebuildable, gitignored</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">The files are the source of truth.</span> The pglite index is a <em>cache</em>: mutations write the <code>.md</code> first, then reindex. You can always rebuild — and <code>git diff</code> — the whole graph from disk. Every commit is a fully-revisioned snapshot backup.</p></div>
+
+      <h3><span class="pill g">3</span> Ask for help anytime</h3>
+      <pre><button class="copy">copy</button><code>brain              <span class="c"># the grouped command list</span>
+brain help graph   <span class="c"># detailed usage + examples for any subcommand</span></code></pre>
+    </section>
+
+    <!-- ========================== FIRST BRAIN ========================== -->
+    <section id="first-brain">
+      <h2><span class="bullet"></span>Build your first brain <a class="anchor" href="#first-brain">#</a></h2>
+      <p class="kicker">Two boxes: declare structure, then write values</p>
+      <p><b>brain</b> has two verbs at its core. <code>def</code> declares <em>structure</em> (the T-box); <code>set</code>&nbsp;/&nbsp;<code>new</code> write <em>values</em> (the A-box). Here's the whole loop end-to-end with a small, generic org graph.</p>
+
+      <h3><span class="pill b">1</span> Declare the schema (T-box)</h3>
+      <pre><button class="copy">copy</button><code><span class="c"># a component is a reusable, typed field-bag</span>
+brain def component Naming     --fields <span class="s">'{name: {type: string, required: true}}'</span>
+brain def component SystemInfo --fields <span class="s">'{name: {type: string, required: true}, category: {type: string}}'</span>
+
+<span class="c"># a class composes components; --top marks it a seed for graph reasoning</span>
+brain def class Team   --components naming:Naming --top
+brain def class System --components info:SystemInfo
+
+<span class="c"># a relation: &lt;REL&gt; &lt;domain&gt; &lt;cardinality&gt; &lt;range&gt;   (oto|otn|nto|mtm)</span>
+brain def relation USES_SYSTEM Team mtm System --qualifiers reason <span class="s">'{type: string}'</span></code></pre>
+
+      <h3><span class="pill b">2</span> Write instances (A-box)</h3>
+      <pre><button class="copy">copy</button><code>brain set System/ledger info.name=<span class="s">"Ledger"</span> info.category=<span class="s">"platform"</span>
+brain set Team/atlas    naming.name=<span class="s">"Atlas"</span>
+
+<span class="c"># add a typed relationship edge, with an optional qualifier</span>
+brain link Team/atlas USES_SYSTEM System/ledger reason=<span class="s">"core dependency"</span></code></pre>
+      <p>Each entity is one Markdown file with flattened YAML frontmatter — human-editable and diff-able:</p>
+      <pre><button class="copy">copy</button><code><span class="c"># db/Team/atlas.md</span>
+<span class="k">---</span>
+<span class="f">naming</span>:
+  <span class="f">name</span>: Atlas
+<span class="f">USES_SYSTEM</span>:
+  - <span class="f">_to</span>: System/ledger
+    <span class="f">reason</span>: core dependency
+<span class="k">---</span></code></pre>
+
+      <h3><span class="pill b">3</span> Validate, index, and ask</h3>
+      <pre><button class="copy">copy</button><code>brain validate     <span class="c"># schema + lint check of every entity (exit 1 on error)</span>
+brain reindex      <span class="c"># rebuild the pglite index + embeddings from the .md files</span>
+brain get Team/atlas --links               <span class="c"># read it back, incoming edges too</span>
+brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>   <span class="c"># find every such edge</span></code></pre>
+      <div class="callout note"><p><span class="lbl">That's the entire mental model.</span> Everything else in brain — bulk ingest, refiners, component methods, the five query modes, MCP — is built on these two boxes and the one guarantee that <em>writes are validated</em>.</p></div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============================= SLUGS ============================= -->
+    <section id="slugs">
+      <h2><span class="bullet"></span>Slugs &amp; files <a class="anchor" href="#slugs">#</a></h2>
+      <p class="kicker">Every entity is one file, addressed by a slug</p>
+      <p>A <strong>slug</strong> is always <code>Class/id</code> — class-prefixed. It's also the path: <code>Person/jdoe</code> lives at <code>db/Person/jdoe.md</code>. Inside the frontmatter, <strong>lowercase keys are components</strong>; <strong>ALL-UPPERCASE keys are relations</strong>. That single convention is how brain tells data from edges.</p>
+      <table>
+        <thead><tr><th>Key</th><th>Kind</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>identity</code></td><td>component</td><td>a typed field-bag on the entity</td></tr>
+          <tr><td><code>REPORTS_TO</code></td><td>relation</td><td>a typed edge to another entity</td></tr>
+        </tbody>
+      </table>
+      <div class="callout tip"><p><span class="lbl">Reads are case-insensitive; writes are not.</span> <code>brain get person/JDOE</code> resolves to <code>Person/jdoe</code>. But when you <em>write</em> a slug — a <code>[[wiki-link]]</code> or a <code>REL=Class/id</code> assignment — use canonical casing (ProperCase class, lowercase id).</p></div>
+    </section>
+
+    <!-- ============================== TBOX ============================= -->
+    <section id="tbox">
+      <h2><span class="bullet"></span>T-box: the schema <a class="anchor" href="#tbox">#</a></h2>
+      <p class="kicker">Components, classes, relations — the vocabulary</p>
+      <p>The <strong>T-box</strong> is the rulebook: what kinds of things exist, what properties they carry, and which connections are legal. brain's ontology has three building blocks, borrowed from the Entity-Component-System pattern game engines use to keep thousands of objects organized.</p>
+      <div class="grid cols-3">
+        <div class="card"><h4>Component</h4><p class="tag">the "C" in ECS</p><p class="muted">A reusable, typed bag of fields (<code>Naming</code>, <code>Identity</code>). Field types: <code>string · bool · int · date · enum · ref · json</code>, with <code>list: true</code> for arrays.</p></div>
+        <div class="card"><h4>Class</h4><p class="tag">composes components</p><p class="muted">An entity type built by aliasing components onto it — <code>Person</code> <em>has</em> an <code>identity</code> and a <code>contact</code>. <code>--top</code> marks it a seed for graph traversal.</p></div>
+        <div class="card"><h4>Relation</h4><p class="tag">a typed edge</p><p class="muted">A directed link with a <em>domain</em>, <em>range</em>, and <em>cardinality</em> (<code>oto/otn/nto/mtm</code>), plus optional edge qualifiers.</p></div>
+      </div>
+      <p>Inspect the schema at any time — brain renders it as YAML, a Mermaid graph, or per-class outlines:</p>
+      <pre><button class="copy">copy</button><code>brain schema graph                   <span class="c"># whole schema as a mermaid graph (+ instance counts)</span>
+brain schema classes Person          <span class="c"># one class: its components / top / idField</span>
+brain schema methods EntityJournal   <span class="c"># component methods callable on a class</span></code></pre>
+      <div class="callout why"><p><span class="lbl">Why bother with a schema at all?</span> Because schema-aware memory behaves better than schema-blind memory in three ways: <strong>retrieval</strong> (the system knows what kinds of things exist and how they connect), <strong>validation</strong> (bad links and malformed properties are rejected early), and <strong>reasoning</strong> (schema narrows the plausible interpretations). Nothing stops a schema-less store from recording that a <em>server</em> "reports to" a person.</p></div>
+    </section>
+
+    <!-- ============================== ABOX ============================= -->
+    <section id="abox">
+      <h2><span class="bullet"></span>A-box: the instances <a class="anchor" href="#abox">#</a></h2>
+      <p class="kicker">Concrete entities and their real relations</p>
+      <p>The <strong>A-box</strong> is the populated graph — the actual <code>Person/jdoe</code>, <code>Team/atlas</code>, and the edges between them. You write it with a handful of verbs:</p>
+      <table>
+        <thead><tr><th>Command</th><th>Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>brain new &lt;Class&gt; &lt;REL&gt;=&lt;slug&gt;</code></td><td>instantiate a new entity of a class (id derived from its <a href="#idfield">idField</a>)</td></tr>
+          <tr><td><code>brain set &lt;slug&gt; &lt;alias.field&gt;=&lt;value&gt;</code></td><td>write component fields (or <code>&lt;REL&gt;=&lt;slug&gt;</code> edges) onto an entity</td></tr>
+          <tr><td><code>brain link &lt;slug&gt; &lt;REL&gt; &lt;slug&gt;</code></td><td>add a typed edge with optional qualifiers</td></tr>
+          <tr><td><code>brain get &lt;slug&gt; [--links]</code></td><td>print an entity (and who points at it)</td></tr>
+          <tr><td><code>brain ls [&lt;Class&gt;]</code></td><td>list instance ids, <code>ls</code>-style</td></tr>
+          <tr><td><code>brain rm &lt;slug&gt;</code></td><td>remove entities</td></tr>
+        </tbody>
+      </table>
+      <pre><button class="copy">copy</button><code>brain set Person/jdoe identity.name=<span class="s">'Jane Doe'</span>   <span class="c"># set a component field</span>
+brain set Person/jdoe REPORTS_TO=Person/asmith    <span class="c"># add a relation edge inline</span>
+brain get Person/jdoe --links
+<span class="p">incoming:</span>
+<span class="p">- from: EntityJournal/jdoe</span>
+<span class="p">  rel: BELONGS_TO</span></code></pre>
+    </section>
+
+    <!-- ============================ VALIDATE =========================== -->
+    <section id="validate">
+      <h2><span class="bullet"></span>Validation &amp; lint <a class="anchor" href="#validate">#</a></h2>
+      <p class="kicker">The guarantee that keeps the graph trustworthy</p>
+      <p>Point a general LLM agent at raw files and it creates duplicates and schema-invalid data. In brain, <strong>every write goes through validation — from the CLI <em>and</em> over MCP</strong> — so the graph stays internally consistent and verifiable.</p>
+      <pre><button class="copy">copy</button><code>brain validate     <span class="c"># validate each entity against the schema + lint (orphans); exit 1 on error</span></code></pre>
+      <p>Validation checks that component fields match their declared types, required fields are present, relation targets resolve to real entities of the right class, cardinality holds, and filenames are canonical. The lint pass flags orphans and other structural smells.</p>
+      <div class="callout gotcha"><p><span class="lbl">This is the difference between a memory and a log.</span> A log preserves every event; a memory layer preserves the <em>current best representation</em> of what should still be remembered. Validation-on-write is what lets brain be a maintained knowledge layer rather than an append-only pile.</p></div>
+    </section>
+
+    <!-- ============================ IDFIELD ============================ -->
+    <section id="idfield">
+      <h2><span class="bullet"></span>Canonical ids <a class="anchor" href="#idfield">#</a></h2>
+      <p class="kicker">Solving the "three half-filled Janes" problem</p>
+      <p>When an LLM extracts entities from messy text, it usually only catches part of the story — it sees "Jane from the payments team" but not her username. A class can declare an <code>idField</code> so its slug is <em>derived</em> from a canonical value rather than an LLM's arbitrary guess:</p>
+      <pre><button class="copy">copy</button><code><span class="c"># schema.yaml — Person's id IS its username</span>
+<span class="f">classes</span>:
+  <span class="f">Person</span>:
+    <span class="f">idField</span>: identity.username</code></pre>
+      <p>Until the username is known, the entity gets a deterministic <strong>placeholder id</strong> (e.g. <code>Person/a9089c66</code>). A <a href="#refiners">refiner</a> resolves it later — renaming <code>Person/a9089c66</code> → <code>Person/jdoe</code> and merging any duplicate that already existed. That rename-and-merge is the dedup win against append-only bloat.</p>
+      <div class="callout tip"><p><span class="lbl">idField can also name a relation.</span> Give an ALL-UPPERCASE relation as the idField and the id becomes the basename of that relation's single target — e.g. a per-person <code>EntityJournal</code> whose slug <em>is</em> its owner. Create one with just the class: <code>brain new EntityJournal BELONGS_TO=Person/jdoe</code> → <code>EntityJournal/jdoe</code>.</p></div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============================= INGEST ============================ -->
+    <section id="ingest">
+      <h2><span class="bullet"></span>Bulk ingest <a class="anchor" href="#ingest">#</a></h2>
+      <p class="kicker">Write: turn a folder of docs into typed entities</p>
+      <p>Point brain at a directory of Markdown and it LLM-extracts schema-conformant entities from every file. Extraction is deliberately <strong>lenient</strong>: it writes partial entities fast (unknowns become warnings and placeholder ids) rather than failing the whole run — you repair afterward with <a href="#refiners">refine</a>.</p>
+      <pre><button class="copy">copy</button><code>brain ingest ./docs                        <span class="c"># extract entities from every .md under ./docs</span>
+brain ingest ./docs --extract Person Team  <span class="c"># ...limited to these classes</span>
+brain ingest ./docs --suggest              <span class="c"># dry run: print suggested `def` lines, write nothing</span></code></pre>
+      <div class="callout note"><p><span class="lbl">This is the mem0 "add → learn → retrieve" loop.</span> Ingest is <em>add</em> (drop raw data in); refine is <em>learn</em> (extract and reconcile durable memory); the <a href="#query">query modes</a> are <em>retrieve</em>. Fact memory is the first serious layer — brain just makes each fact a typed, relatable entity instead of a flat string.</p></div>
+    </section>
+
+    <!-- ============================ REFINERS =========================== -->
+    <section id="refiners">
+      <h2><span class="bullet"></span>Refiners <a class="anchor" href="#refiners">#</a></h2>
+      <p class="kicker">Maintain: finish the job, then de-dupe</p>
+      <p>A <strong>refiner</strong> is a small script you write <em>once per class</em> that knows how to finish an entity: it looks the record up in a source you already trust — a company directory, an internal API, a spreadsheet — fills in the blanks, gives it a real id, <strong>merges the duplicates into one</strong>, and can pull in related records automatically.</p>
+      <pre><button class="copy">copy</button><code>brain ingest ./docs             <span class="c"># fast + lenient: writes partial, placeholder-id entities</span>
+brain refine                    <span class="c"># then finish + de-dupe every entity that has a refiner</span>
+brain refine --class Person     <span class="c"># ...or just the people</span></code></pre>
+      <p>For example, a <code>Person</code> refiner that queries your directory fills in identity / contact / employment, then:</p>
+      <ul>
+        <li><strong>renames</strong> the placeholder to the canonical id (<code>Person/a9089c66</code> → <code>Person/jdoe</code>), merging into any existing record — the dedup win;</li>
+        <li><strong>follows relation chains</strong> recursively (bounded by <code>--max-passes</code>), auto-creating and resolving each hop — e.g. walking a <code>REPORTS_TO</code> chain <code>jdoe → asmith → …</code>.</li>
+      </ul>
+      <div class="callout why"><p><span class="lbl">This is CRUD maintenance, made concrete.</span> Durable memory can't be append-only. A refiner is where <code>UPDATE</code> (better value arrives), <code>ADD</code> (a manager not yet in the graph), and de-dup (two records are the same person) actually happen — the maintenance semantics that keep memory current instead of stale, contradictory, and noisy. Because a refiner calls <em>your</em> tools, it ships with your data (<code>&lt;cwd&gt;/refiner/&lt;Class&gt;.coffee</code>), not with the brain binary.</p></div>
+    </section>
+
+    <!-- =========================== COMPONENTS ========================== -->
+    <section id="components">
+      <h2><span class="bullet"></span>Component methods <a class="anchor" href="#components">#</a></h2>
+      <p class="kicker">Attach safe, validated behavior to your data</p>
+      <p>Some entities aren't just facts you read — they're things you <em>act on</em>: a running journal, a ticket you transition, a checklist you tick off. Because every entity is assembled from reusable <a href="#tbox">components</a>, any behavior you attach to a component is instantly available on <em>every</em> class that uses it.</p>
+      <pre><button class="copy">copy</button><code>brain schema methods EntityJournal     <span class="c"># "what can I do with this?"</span>
+<span class="p">- Entry__list()             # List all journal entries (newest last).</span>
+<span class="p">- Entry__add(msg: string)   # Append a journal entry.</span>
+<span class="p">- Entry__remove(id: string) # Remove a journal entry by id.</span>
+
+brain call EntityJournal/jdoe Entry__add <span class="s">'msg: kicked off the migration'</span>
+<span class="p">added entry a1b2c3</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">A validated, typed API — never hand-edited YAML.</span> The same methods are reachable over <a href="#mcp">MCP</a>, so an AI assistant can append to that journal on your behalf through a checked interface, and can't scribble a malformed date or broken list into your files.</p></div>
+    </section>
+
+    <!-- ============================ WIKILINKS ========================== -->
+    <section id="wikilinks">
+      <h2><span class="bullet"></span>Wiki-links <a class="anchor" href="#wikilinks">#</a></h2>
+      <p class="kicker">Keep the prose readable while the graph stays in sync</p>
+      <p>Inside an entity's Markdown body, wiki-links become typed edges in the frontmatter automatically on the next write / reindex — the same backlink idea a local-first wiki uses, but typed:</p>
+      <table>
+        <thead><tr><th>Syntax</th><th>Becomes</th></tr></thead>
+        <tbody>
+          <tr><td><code>[[Class/id]]</code></td><td>a <code>LINKS_TO</code> edge to that entity</td></tr>
+          <tr><td><code>[[Class/id|Anchor text]]</code></td><td>same edge; the anchor keeps your original wording</td></tr>
+          <tr><td><code>[[REL:Class/id]]</code></td><td>a typed <code>REL</code> edge (any relation in your schema)</td></tr>
+          <tr><td><code>[[REL:Class/id|Anchor]]</code></td><td>typed <code>REL</code> edge with a display anchor</td></tr>
+        </tbody>
+      </table>
+      <p>Handy scenarios:</p>
+      <ul>
+        <li><strong>Mention without breaking the sentence</strong> — "shipped by <code>[[Person/jdoe|Jane]]</code>" reads naturally and links.</li>
+        <li><strong>Assert a typed fact inline</strong> — "owned by <code>[[OWNED_BY:Team/atlas]]</code>" adds the edge without hand-editing YAML.</li>
+        <li><strong>Auto-enrichment</strong> — <code>brain enrich &lt;path&gt;</code> rewrites existing docs, inserting wiki-links to entities it finds (add <code>--ingest</code> to also create missing ones).</li>
+      </ul>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============================= QUERY ============================= -->
+    <section id="query">
+      <h2><span class="bullet"></span>Five ways to ask <a class="anchor" href="#query">#</a></h2>
+      <p class="kicker">Retrieve: pick by what you know going in</p>
+      <p>brain exposes five query subcommands. They trade off along two axes — <em>deterministic vs. LLM-assisted</em>, and <em>ranked retrieval vs. exact traversal</em>. The point isn't one true query; it's matching the mode to the question.</p>
+      <table>
+        <thead><tr><th>Command</th><th>Kind</th><th>Use it when…</th></tr></thead>
+        <tbody>
+          <tr><td><code>search</code></td><td>deterministic retrieval</td><td>you want a ranked list from a fuzzy phrase</td></tr>
+          <tr><td><code>think</code></td><td>LLM synthesis (RAG)</td><td>you want a written answer, not a list</td></tr>
+          <tr><td><code>ontology</code></td><td>LLM graph traversal</td><td>a multi-hop relational question, unknown slugs</td></tr>
+          <tr><td><code>graph</code></td><td>deterministic match</td><td>"find every pair matching this edge shape"</td></tr>
+          <tr><td><code>graphql</code></td><td>deterministic traversal</td><td>you know the entity, want specific fields</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ============================ SEARCH ============================= -->
+    <section id="search">
+      <h3><code>search</code> — hybrid retrieval</h3>
+      <p>Runs a keyword (<a href="https://www.postgresql.org/docs/current/textsearch.html">Postgres FTS</a>) query <strong>and</strong> a vector (<a href="https://github.com/pgvector/pgvector">pgvector</a> cosine) query in parallel, then fuses the two ranked lists with <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a> (RRF, <code>k=60</code>) — so a result that ranks well in <em>either</em> signal floats up without hand-tuned weights. It then does a <strong>1-hop relational expansion</strong>: top seeds pull in their typed neighbors, so structurally-adjacent entities surface even when their text didn't match.</p>
+      <pre><button class="copy">copy</button><code>brain search <span class="s">"shared platform services"</span>             <span class="c"># ranked hybrid search</span>
+brain search --limit 5 --explain <span class="s">"payments platform"</span>  <span class="c"># top 5, per-stage rank attribution</span></code></pre>
+      <div class="callout note"><p><span class="lbl">Keywords + vectors, not either/or.</span> Keyword search demands you guess the exact words used at write time; vector search matches synonyms and paraphrases. Strong systems combine both — exact identifiers via FTS, fuzzy recall via embeddings — and let RRF pick the winners.</p></div>
+    </section>
+
+    <!-- ============================= THINK ============================= -->
+    <section id="think">
+      <h3><code>think</code> — grounded synthesis (RAG)</h3>
+      <p>Retrieval-augmented generation: it calls <code>search</code> under the hood, feeds the top hits to an LLM, and returns a natural-language <strong>answer with citations</strong> to the source slugs and an explicit list of <strong>gaps</strong> (what the graph couldn't support). The model only ever sees retrieved context, so answers stay grounded.</p>
+      <pre><button class="copy">copy</button><code>brain think <span class="s">"what does the atlas team depend on and why?"</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">Retrieval only matters if it grounds the answer.</span> A disciplined RAG flow recalls a bounded set of memories, answers from those when possible, and says "I don't recall" when the memory layer has no support — much better than letting the model improvise a confident answer just because the conversation feels familiar.</p></div>
+    </section>
+
+    <!-- =========================== ONTOLOGY =========================== -->
+    <section id="ontology">
+      <h3><code>ontology</code> — typed multi-hop traversal</h3>
+      <p>A tool-using agent (not a one-shot prompt): given a question, it may <code>search</code> and walk typed edges over several turns. The heavy lifting is deterministic — a <strong>bidirectional BFS <code>paths</code> tool</strong> finds every path from a start entity to entities of a target class within <code>maxHops</code>, returning compact paths so the model can answer in a single call. The model only decides <em>where to look</em>; it never fabricates edges.</p>
+      <pre><button class="copy">copy</button><code>brain ontology <span class="s">"which non-lead engineer supports the payments product?"</span></code></pre>
+      <div class="callout why"><p><span class="lbl">Why not hand the model a query DSL?</span> Because a bespoke string DSL forces the LLM to solve <em>action selection under schema uncertainty</em> — choose the action, know the schema, pick the relation path, <em>and</em> satisfy a brittle grammar, all at once. <code>ontology</code> keeps the grammar deterministic (the BFS tool) and lets the model do only what it's good at: deciding where to look.</p></div>
+    </section>
+
+    <!-- ============================= GRAPH ============================= -->
+    <section id="graph">
+      <h3><code>graph</code> — structural pattern-match</h3>
+      <p>A fully deterministic, no-LLM structural query using a <a href="https://mermaid.js.org/">Mermaid</a>-ish edge syntax. Wildcards <code>*</code> / <code>**</code> / <code>***</code> match 1 / 2 / 3-degree connections; a concrete <code>Class/id</code> pins a position to a specific entity.</p>
+      <pre><button class="copy">copy</button><code>brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>    <span class="c"># every Team→System usage edge</span>
+brain graph <span class="s">'* --> Person/jdoe --> *'</span>         <span class="c"># nodes within 1 degree of Person/jdoe</span>
+brain graph <span class="s">'* > Person/jdoe > *'</span>             <span class="c"># shorthand: '>' is the unlabeled '-->'</span></code></pre>
+      <div class="callout note"><p><span class="lbl">Ideal for audits.</span> Enumerating every subgraph that matches a <em>pattern</em> — orphan-hunting, "who uses what", policy checks — where you want exact, fast, reproducible results with no model in the loop.</p></div>
+    </section>
+
+    <!-- ============================ GRAPHQL ============================ -->
+    <section id="graphql">
+      <h3><code>graphql</code> — projected traversal from a known root</h3>
+      <p>A deterministic <a href="https://graphql.org/">GraphQL</a>-ish DSL: start from a known slug and select exactly the components, relations, and nested sub-fields you want (relations recurse into the target entity). Slugs are case-insensitive; the query can be an argument or piped via stdin / heredoc.</p>
+      <pre><button class="copy">copy</button><code>brain graphql <span class="s">'person/jdoe { identity { name } }'</span>   <span class="c"># project fields + follow a relation</span>
+brain graphql &lt;&lt;<span class="s">'EOF'</span>                               <span class="c"># ...or read the query from stdin (heredoc)</span>
+Person/jdoe {
+  identity { name },
+  REPORTS_TO { identity { name } }
+}
+EOF
+<span class="p">slug: Person/jdoe</span>
+<span class="p">identity:</span>
+<span class="p">  name: Jane Doe</span>
+<span class="p">REPORTS_TO:</span>
+<span class="p">  - slug: Person/asmith</span>
+<span class="p">    identity:</span>
+<span class="p">      name: Alan Smith</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">An API-style read, not a search.</span> When you already know the entity and want a precise, shaped projection of specific fields plus its neighbors, <code>graphql</code> gives you exactly that — deterministically.</p></div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============================== MCP ============================== -->
+    <section id="mcp">
+      <h2><span class="bullet"></span>Serving agents over MCP <a class="anchor" href="#mcp">#</a></h2>
+      <p class="kicker">Use · the capstone — the ontology shapes the tool surface</p>
+      <p>The final layer of the memory stack is how an agent is <em>allowed to act</em>. brain serves itself over the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> as a set of <strong>structured, typed tools</strong> — not one giant query DSL.</p>
+      <pre><button class="copy">copy</button><code>brain mcp     <span class="c"># stdio MCP server</span></code></pre>
+      <p>It exposes <code>search</code>, <code>think</code>, <code>ontology</code>, <code>graph</code>, <code>graphql</code>, <code>get_entity</code>, <code>put_entity</code>, <code>schema_methods</code>, and <code>method_invoke</code>. Crucially, <code>put_entity</code> validates before writing and returns validation/lint failures as tool errors — the <strong>sanctioned write path</strong> for agents, with no direct file edits.</p>
+      <div class="callout why"><p><span class="lbl">Why structured tools beat a string DSL.</span> A structured tool call removes the grammar burden and exposes intent directly. Compare <code>ontology search "(:Team)-[:OWNS].role→: owner"</code> with a typed call <code>{ class: "Team", relation: "OWNS", relation_property: { role: "owner" } }</code>. Both are schema-dependent, but the typed one is far easier for an agent to produce correctly on the first try. This is the whole point of an MCP surface: shift the problem from brittle syntax to explicit, typed intent — and let the <em>ontology shape the tools the agent sees</em>.</p></div>
+    </section>
+
+    <!-- ========================= ARCHITECTURE ========================= -->
+    <section id="architecture">
+      <h2><span class="bullet"></span>Reference architecture <a class="anchor" href="#architecture">#</a></h2>
+      <p class="kicker">Where brain sits in the memory stack</p>
+      <p>Advanced long-term memory is layered, and the layers reinforce each other. Memory becomes far more useful when <em>what</em> is remembered, <em>how</em> it's structured, and <em>how</em> the agent may act all line up. brain implements the durable layers of that stack in one cwd-local tool:</p>
+      <table>
+        <thead><tr><th>Layer</th><th>brain provides</th></tr></thead>
+        <tbody>
+          <tr><td>Short-term context</td><td><span class="muted">(the calling agent's prompt window)</span></td></tr>
+          <tr><td>Fact memory</td><td>typed entities extracted via <code>ingest</code> / <code>set</code></td></tr>
+          <tr><td>Knowledge graph</td><td>explicit relations + <code>graph</code> / <code>graphql</code> traversal</td></tr>
+          <tr><td>Ontology</td><td>the T-box schema, constraints, and <code>schema</code> introspection</td></tr>
+          <tr><td>Structured tools</td><td>the MCP surface — validated, typed, reliable</td></tr>
+          <tr><td>Dynamic tool shaping</td><td><span class="muted">frontier: schema-derived tools per task (future)</span></td></tr>
+        </tbody>
+      </table>
+      <div class="callout note"><p><span class="lbl">The throughline.</span> Combine fact extraction, maintained memory, graph structure, ontology, and structured tools so the agent's action space matches the memory substrate. That alignment — not "store more" — is what makes memory both durable and genuinely usable.</p></div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============================= LAYOUT ============================ -->
+    <section id="layout">
+      <h2><span class="bullet"></span>Layout &amp; config <a class="anchor" href="#layout">#</a></h2>
+      <p class="kicker">Everything is cwd-local and portable</p>
+      <pre><button class="copy">copy</button><code><span class="f">brain.yaml</span>               <span class="c"># per-db config, sibling of db/</span>
+<span class="f">db/</span>
+  <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entities (A-box, git-tracked)</span>
+  <span class="f">schema.yaml</span>            <span class="c"># the T-box (git-tracked)</span>
+  <span class="f">pgdata/</span>                <span class="c"># pglite index (rebuildable → gitignored)</span>
+<span class="f">refiner/&lt;Class&gt;.coffee</span>    <span class="c"># optional per-class refiners (dataset-local)</span>
+<span class="f">components/&lt;Comp&gt;.coffee</span>  <span class="c"># optional component methods (dataset-local)</span></code></pre>
+      <pre><button class="copy">copy</button><code><span class="c"># brain.yaml — defaults</span>
+<span class="f">embed</span>:
+  <span class="f">model</span>: copilot:text-embedding-3-small
+<span class="f">think</span>:
+  <span class="f">model</span>: copilot:claude-sonnet-5
+<span class="f">search</span>:
+  <span class="f">reranker</span>: off
+<span class="f">refine</span>:
+  <span class="f">maxPasses</span>: 4
+<span class="f">storage</span>: []             <span class="c"># additional db dirs to aggregate (e.g. a private overlay)</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">Multiple brains, shared or private.</span> Keep one brain per app, commit them to different repos (some shared, some private), and aggregate extra <code>db/</code> dirs via <code>storage:</code>. A peer clones the <code>.md</code> files and runs <code>brain reindex</code> to rebuild the index with <em>their</em> embedder — models need not match, only be internally consistent.</p></div>
+    </section>
+
+    <!-- ============================== CLI ============================= -->
+    <section id="cli">
+      <h2><span class="bullet"></span>CLI cheat-sheet <a class="anchor" href="#cli">#</a></h2>
+      <p class="kicker">Run <code>brain help &lt;subcommand&gt;</code> for detailed usage + examples</p>
+      <table>
+        <thead><tr><th>Group</th><th>Commands</th></tr></thead>
+        <tbody>
+          <tr><td>Create</td><td><code>init</code></td></tr>
+          <tr><td>Schema (T-box)</td><td><code>def component</code> · <code>def class</code> · <code>def relation</code> · <code>schema graph|uniq|components|classes|methods</code></td></tr>
+          <tr><td>Data (A-box)</td><td><code>new</code> · <code>set</code> · <code>ls</code> · <code>link</code> · <code>get</code> · <code>rm</code> · <code>call</code></td></tr>
+          <tr><td>External data</td><td><code>ingest</code> · <code>enrich</code></td></tr>
+          <tr><td>Integrity</td><td><code>reindex</code> · <code>validate</code> · <code>refine</code></td></tr>
+          <tr><td>Query</td><td><code>search</code> · <code>think</code> · <code>ontology</code> · <code>graph</code> · <code>graphql</code></td></tr>
+          <tr><td>Serve</td><td><code>mcp</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ============================ READING ============================ -->
+    <section id="reading">
+      <h2><span class="bullet"></span>Further reading <a class="anchor" href="#reading">#</a></h2>
+      <ul>
+        <li><a href="https://github.com/mikesmullin/brain">github.com/mikesmullin/brain</a> — the source, README, and <code>SKILL.md</code> (the agent-facing quick reference).</li>
+        <li><a href="https://github.com/mikesmullin/ontology">ontology</a> — brain's predecessor (v1), where the T-box / A-box model started.</li>
+        <li><a href="https://github.com/mikesmullin/agl">agl-ai</a> — the embeddings + chat + microagent framework brain builds on.</li>
+        <li><a href="https://modelcontextprotocol.io">Model Context Protocol</a> · <a href="https://pglite.dev">pglite</a> · <a href="https://github.com/pgvector/pgvector">pgvector</a> — the moving parts under the hood.</li>
+      </ul>
+    </section>
+
+    <!-- ============================= FOOTER ============================ -->
+    <div class="foot">
+      <div class="brainrow">🧠 🧠 🧠</div>
+      <p><strong>brain</strong> — data for agentic AI. A knowledge graph that lives in your repo.<br>
+      Write · maintain · retrieve · use. Your memory, typed and yours.</p>
+      <p class="muted">Built on Bun + CoffeeScript · ECS ontology · pglite hybrid search · MCP tools</p>
+    </div>
+
+  </div>
+  </main>
+</div>
+
+<script>
+  // sidebar active-link highlighting via IntersectionObserver
+  const links = [...document.querySelectorAll('.sidebar a.nav-link')];
+  const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  const targets = [...document.querySelectorAll('section[id], [id="top"]')];
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        const a = map.get(e.target.id);
+        if (a) { links.forEach(l => l.classList.remove('active')); a.classList.add('active'); }
+      }
+    });
+  }, { rootMargin: '-35% 0px -60% 0px', threshold: 0 });
+  targets.forEach(s => obs.observe(s));
+
+  // mobile nav toggle
+  const sb = document.getElementById('sidebar');
+  document.getElementById('navToggle')?.addEventListener('click', () => sb.classList.toggle('open'));
+  sb.addEventListener('click', e => { if (e.target.matches('a.nav-link')) sb.classList.remove('open'); });
+
+  // copy-to-clipboard on code blocks
+  document.querySelectorAll('pre .copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const code = btn.parentElement.querySelector('code')?.innerText ?? '';
+      navigator.clipboard.writeText(code).then(() => {
+        const t = btn.textContent; btn.textContent = 'copied!';
+        setTimeout(() => btn.textContent = t, 1200);
+      });
+    });
+  });
+</script>
+</body>
+</html>
