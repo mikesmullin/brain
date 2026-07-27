@@ -240,9 +240,10 @@ brain mcp           # stdio MCP server
 ```
 
 Exposes tools: `search`, `think`, `ontology`, `graph`, `graphql`, `get_entity`, `put_entity`,
-`schema_methods`, `method_invoke`.
-`put_entity` validates before writing and returns validation/lint failures as MCP tool errors — the
-sanctioned write path for agents (no direct file edits).
+`delete_entity`, `schema_methods`, `method_invoke`.
+`put_entity` always writes (soft validation notice if schema-invalid). `delete_entity` removes a
+slug from disk + search index (CLI `brain rm`). Sanctioned agent write/delete path — no direct
+file edits.
 
 ## Notes
 

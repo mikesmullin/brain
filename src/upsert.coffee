@@ -1,6 +1,7 @@
 # upsert.coffee — the single sanctioned write path for A-box instances.
-# Validates the candidate world in-memory FIRST, and only writes .md on success
-# (write-then-validate-then-rollback guarantee, done proactively).
+# Always persists .md (SoT). Validation runs and is reported, but by default does
+# NOT block the write — agents/voice paths should store partial facts and fix up.
+# Pass strict: true to throw on validation errors (CLI opt-in when desired).
 import { writeEntityFile } from './storage.coffee'
 import { reconcileBodyLinks } from './storage.coffee'
 import { validateData } from './validate.coffee'
@@ -22,7 +23,7 @@ export validateCandidate = (world, entity) ->
   slugErrors = res.errors.filter (m) -> m.startsWith("#{entity.slug}:") or m.indexOf("'#{entity.slug}'") >= 0
   { valid: slugErrors.length is 0, errors: slugErrors, allErrors: res.errors, warnings: res.warnings }
 
-# Upsert an entity: validate candidate, then write to the target storage dir.
+# Upsert an entity: write to storage; validate for the response (unless strict).
 export upsertEntity = (world, entity, opts = {}) ->
   existing = world.bySlug[entity.slug]
   storageDir = opts.storageDir
@@ -31,12 +32,18 @@ export upsertEntity = (world, entity, opts = {}) ->
   storageDir or= world.primaryStorageDir
   reconcileBodyLinks(entity)
   res = validateCandidate(world, entity)
-  unless res.valid
+  slugWarnings = res.warnings.filter((m) -> m.indexOf(entity.slug) >= 0)
+  if opts.strict and not res.valid
     err = new Error("validation failed for #{entity.slug}:\n  " + res.errors.join('\n  '))
     err.validation = res
     throw err
   fp = await writeEntityFile(storageDir, entity)
-  { path: fp, warnings: res.warnings.filter((m) -> m.indexOf(entity.slug) >= 0) }
+  {
+    path: fp
+    valid: res.valid
+    warnings: slugWarnings
+    validationErrors: res.errors
+  }
 
 # Batch upsert: canonicalize ids (idField-derived, placeholders where unknown),
 # validate ALL candidates together (so forward references resolve), then write.

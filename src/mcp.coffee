@@ -1,8 +1,8 @@
 # mcp.coffee — Model Context Protocol server over stdio (default) or http.
-# Exposes brain's read/query surfaces + a validated write path. This is the
-# sanctioned way for an external agent to use the brain (never direct file edits):
-# every write goes through validation, and validation/lint errors are returned as
-# MCP tool errors.
+# Exposes brain's read/query surfaces + a write path. This is the sanctioned way
+# for an external agent to use the brain (never direct file edits). put_entity
+# always persists; schema validation is reported as soft issues to fix up when
+# possible, not as a hard tool error that blocks storage.
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -15,7 +15,8 @@ import { runQuery } from './graphmatch.coffee'
 import { runGraphql } from './graphqlish.coffee'
 import { upsertEntity } from './upsert.coffee'
 import { parseSlug, formatSlug } from './slug.coffee'
-import { isRelationKey } from './storage.coffee'
+import { isRelationKey, removeEntityFile } from './storage.coffee'
+import { dirname } from 'path'
 import { applicableMethods, invokeMethod, signatureOf } from './components.coffee'
 import { Index } from './index.coffee'
 import { loadConfig } from './config.coffee'
@@ -74,7 +75,7 @@ TOOLS = [
   }
   {
     name: 'put_entity'
-    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Validates before writing; returns a tool error on validation failure.'
+    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Always writes the record even if schema validation fails; invalid writes succeed with a notice listing issues to fix when possible (overwrite=true).'
     inputSchema:
       type: 'object'
       properties:
@@ -82,6 +83,15 @@ TOOLS = [
         content: { type: 'string' }
         overwrite: { type: 'boolean' }
       required: ['slug', 'content']
+  }
+  {
+    name: 'delete_entity'
+    description: 'Permanently remove an entity by slug (Class/id), e.g. Note/family-kids or Person/lsmullin. Deletes the .md file and drops it from the search index. Same as CLI `brain rm`. Does not cascade-delete other entities that only link to it.'
+    inputSchema:
+      type: 'object'
+      properties:
+        slug: { type: 'string', description: 'Entity slug Class/id to remove' }
+      required: ['slug']
   }
   {
     name: 'schema_methods'
@@ -106,6 +116,29 @@ TOOLS = [
 
 textResult = (obj) -> { content: [{ type: 'text', text: (if typeof obj is 'string' then obj else yaml.dump(obj, { lineWidth: 120, sortKeys: false, noRefs: true })) }] }
 errorResult = (msg) -> { content: [{ type: 'text', text: msg }], isError: true }
+
+# Agent-facing put_entity outcome: always "saved" when write succeeded; invalid
+# schema is a soft notice, not isError.
+formatPutEntityResult = (entity, r) ->
+  base =
+    slug: entity.slug
+    path: r.path
+    valid: r.valid isnt false
+    warnings: r.warnings or []
+  if r.valid isnt false
+    return base
+  reasons = r.validationErrors or []
+  notice = [
+    "Record was created and persisted at #{r.path}, but it is considered INVALID for the following reasons:"
+    (reasons.map (m) -> "  - #{m}").join('\n') or '  - (unspecified validation errors)'
+    ''
+    'Fixing these is not mandatory for the data to be stored and persisted.'
+    'If you can, try an update (overwrite=true) with corrected content so the record becomes valid.'
+  ].join('\n')
+  Object.assign base,
+    valid: false
+    validation_errors: reasons
+    notice: notice
 
 contentToEntity = (slug, content) ->
   { cls, id } = parseSlug(slug)
@@ -144,7 +177,8 @@ handleCall = (cwd, name, args) ->
       return errorResult("#{slug} already exists (set overwrite=true to replace)") if world.bySlug[slug] and not args.overwrite
       try
         entity = contentToEntity(slug, args.content)
-        r = await upsertEntity(world, entity)
+        # Soft validation: always persist; report schema issues for optional fix-up.
+        r = await upsertEntity(world, entity, { strict: false })
         # Keep pglite search in sync — .md is SoT but search previously lagged
         # until a manual `brain reindex`, so Ada could "save" then fail recall.
         try
@@ -164,9 +198,34 @@ handleCall = (cwd, name, args) ->
         catch idxErr
           # Non-fatal: get_entity still works; search may lag until reindex.
           process.stderr.write("brain mcp: index update failed after put_entity: #{idxErr.message}\n")
-        textResult({ slug: entity.slug, path: r.path, warnings: r.warnings })
+        textResult formatPutEntityResult(entity, r)
       catch err
-        errorResult("validation failed: #{err.message}")
+        errorResult("put_entity failed: #{err.message}")
+    when 'delete_entity'
+      world = await loadWorld(cwd)
+      e = resolveSlug(world, args.slug)
+      return errorResult("not found: #{args.slug}") unless e
+      try
+        # Prefer source path dir (multi-storage); fall back to class dir / primary.
+        storageDir = null
+        if e.source
+          suffix = "/#{e.cls}/#{e.id}.md"
+          storageDir = if e.source.endsWith(suffix) then e.source.slice(0, e.source.length - suffix.length) else dirname(dirname(e.source))
+        storageDir or= world.schema.classDirs?[e.cls]
+        storageDir or= world.primaryStorageDir
+        await removeEntityFile(storageDir, e.cls, e.id)
+        try
+          cfg = await loadConfig(cwd)
+          idx = new Index(cwd)
+          await idx.open()
+          if await idx.isIndexed()
+            await idx.removeEntity(e.slug)
+          await idx.close()
+        catch idxErr
+          process.stderr.write("brain mcp: index update failed after delete_entity: #{idxErr.message}\n")
+        textResult({ slug: e.slug, removed: true, path: e.source or "#{storageDir}/#{e.cls}/#{e.id}.md" })
+      catch err
+        errorResult("delete_entity failed: #{err.message}")
     when 'schema_methods'
       world = await loadWorld(cwd)
       cls = args.class
