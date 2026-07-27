@@ -5,7 +5,7 @@
 import { PGlite } from '@electric-sql/pglite'
 import { vector } from '@electric-sql/pglite/vector'
 import { paths } from './config.coffee'
-import { detectDim, embedTexts, providerModel } from './embed.coffee'
+import { detectDim, embedTexts, embedOne, providerModel } from './embed.coffee'
 
 val2str = (v) ->
   if Array.isArray(v) then v.map(val2str).join(', ')
@@ -95,6 +95,40 @@ export class Index
     await @db.query 'INSERT INTO meta (k,v) VALUES ($1,$2) ON CONFLICT (k) DO UPDATE SET v=$2', ['embed_spec', embedModel]
     await @db.query 'INSERT INTO meta (k,v) VALUES ($1,$2) ON CONFLICT (k) DO UPDATE SET v=$2', ['embed_dim', String(dim)]
     { entities: ents.length, dim, provider, model }
+
+  # Incremental upsert for a single entity (after put_entity / set). If the
+  # index has never been built, no-op — next search will full-reindex.
+  upsertEntity: (entity, embedModel) ->
+    await @open()
+    return { skipped: true, reason: 'not_indexed' } unless await @isIndexed()
+    text = renderEntityText(entity)
+    emb = await embedOne(embedModel, text)
+    source = entity.source or ''
+    await @db.query """
+      INSERT INTO entities (slug, cls, id, source, body) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (slug) DO UPDATE SET cls=$2, id=$3, source=$4, body=$5
+    """, [entity.slug, entity.cls, entity.id, source, entity.body or '']
+    await @db.query """
+      INSERT INTO chunks (slug, text, tsv, embedding) VALUES ($1,$2,to_tsvector('english',$2),$3)
+      ON CONFLICT (slug) DO UPDATE SET text=$2, tsv=to_tsvector('english',$2), embedding=$3
+    """, [entity.slug, text, toVec(emb)]
+    await @db.query 'DELETE FROM links WHERE from_slug = $1', [entity.slug]
+    for own rel, targets of (entity.relations or {})
+      for t in (targets or [])
+        quals = {}
+        quals[k] = v for own k, v of t when k isnt '_to'
+        await @db.query 'INSERT INTO links (from_slug, rel, to_slug, qualifiers) VALUES ($1,$2,$3,$4)',
+          [entity.slug, rel, t._to, JSON.stringify(quals)]
+    { slug: entity.slug }
+
+  # Drop a slug from the index (after rm). No-op if not indexed.
+  removeEntity: (slug) ->
+    await @open()
+    return { skipped: true, reason: 'not_indexed' } unless await @isIndexed()
+    await @db.query 'DELETE FROM chunks WHERE slug = $1', [slug]
+    await @db.query 'DELETE FROM links WHERE from_slug = $1 OR to_slug = $1', [slug]
+    await @db.query 'DELETE FROM entities WHERE slug = $1', [slug]
+    { slug }
 
   # Vector (semantic) search: returns [{ slug, score }] with score in [0,1] (1 = closest).
   vectorSearch: (queryEmbedding, limit = 20) ->

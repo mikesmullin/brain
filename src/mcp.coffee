@@ -17,6 +17,8 @@ import { upsertEntity } from './upsert.coffee'
 import { parseSlug, formatSlug } from './slug.coffee'
 import { isRelationKey } from './storage.coffee'
 import { applicableMethods, invokeMethod, signatureOf } from './components.coffee'
+import { Index } from './index.coffee'
+import { loadConfig } from './config.coffee'
 
 TOOLS = [
   {
@@ -143,6 +145,25 @@ handleCall = (cwd, name, args) ->
       try
         entity = contentToEntity(slug, args.content)
         r = await upsertEntity(world, entity)
+        # Keep pglite search in sync — .md is SoT but search previously lagged
+        # until a manual `brain reindex`, so Ada could "save" then fail recall.
+        try
+          cfg = await loadConfig(cwd)
+          idx = new Index(cwd)
+          await idx.open()
+          unless await idx.isIndexed()
+            # First write: build full index from disk (includes this entity).
+            world2 = await loadWorld(cwd)
+            await idx.reindex(world2, cfg.embed.model)
+          else
+            # Reload entity from disk so source path is set for the index row.
+            world2 = await loadWorld(cwd)
+            e2 = world2.bySlug[entity.slug] or entity
+            await idx.upsertEntity(e2, cfg.embed.model)
+          await idx.close()
+        catch idxErr
+          # Non-fatal: get_entity still works; search may lag until reindex.
+          process.stderr.write("brain mcp: index update failed after put_entity: #{idxErr.message}\n")
         textResult({ slug: entity.slug, path: r.path, warnings: r.warnings })
       catch err
         errorResult("validation failed: #{err.message}")

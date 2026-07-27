@@ -25,10 +25,11 @@ rrf = (lists) ->
 export hybridSearch = (cwd, query, opts = {}) ->
   limit = opts.limit or 10
   cfg = await loadConfig(cwd)
+  # Authoritative world first — used to drop ghost hits from a stale index.
+  world = await loadWorld(cwd)
   idx = new Index(cwd)
   await idx.open()
   unless await idx.isIndexed()
-    world = await loadWorld(cwd)
     console.error "search index missing; indexing #{world.entities.length} entities..."
     await idx.reindex(world, cfg.embed.model)
 
@@ -38,6 +39,11 @@ export hybridSearch = (cwd, query, opts = {}) ->
   pool = Math.max(limit * 4, 20)
   vec = await idx.vectorSearch(qEmb, pool)
   kw = await idx.keywordSearch(query, pool)
+
+  # Drop slugs that no longer exist on disk (stale pglite after rm/overwrite).
+  live = (slug) -> !!world.bySlug[slug]
+  vec = vec.filter (r) -> live(r.slug)
+  kw = kw.filter (r) -> live(r.slug)
 
   vecRanked = vec.map (r) -> r.slug
   kwRanked = kw.map (r) -> r.slug
@@ -49,6 +55,7 @@ export hybridSearch = (cwd, query, opts = {}) ->
   for seed in seeds
     for row in (await idx.outgoing(seed)).concat(await idx.incoming(seed))
       nbr = if row.from_slug is seed then row.to_slug else row.from_slug
+      continue unless live(nbr)
       continue if scores[nbr]   # already a direct hit
       r = (relational[nbr] ?= { seed, hop: 1, path: [seed, nbr], via: [] })
       r.via.push(row.rel) unless row.rel in r.via
@@ -61,8 +68,9 @@ export hybridSearch = (cwd, query, opts = {}) ->
   vecScore = {}; vecScore[r.slug] = r.score for r in vec
   ranked = Object.entries(scores).sort((a, b) -> b[1] - a[1]).slice(0, limit)
 
-  results = for [slug, base], i in ranked
-    e = await idx.entity(slug)
+  results = []
+  for [slug, base] in ranked
+    continue unless live(slug)
     rel = relational[slug]
     res =
       slug: slug
@@ -77,7 +85,11 @@ export hybridSearch = (cwd, query, opts = {}) ->
       res.relational_via_link_types = rel.via
     if opts.explain
       res.explain = { ranks: contrib[slug], reranker: cfg.search.reranker or 'off' }
-    res
+    # Live components from .md (index body may lag until embed updates)
+    if world.bySlug[slug]?.components
+      res.preview = world.bySlug[slug].components
+    results.push res
+  results
 
   await idx.close()
   results
