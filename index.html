@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>brain — Documentation</title>
-<meta name="description" content="brain — a cwd-local knowledge-graph for agents. Typed Markdown entities, an ECS ontology, pglite hybrid search, deterministic graph traversal, and MCP tools. The write → maintain → retrieve → use memory lifecycle, made concrete.">
+<meta name="description" content="brain — a cwd-local knowledge-graph for agents. Typed Markdown entities, an ECS ontology, a resident server with millisecond queries at 2M+ nodes, hybrid search, deterministic graph traversal, a real-time WebGL explorer, and MCP tools. The write → maintain → retrieve → use memory lifecycle, made concrete.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -35,6 +35,7 @@
     <div class="nav-group">
       <div class="nav-title">Get going</div>
       <a class="nav-link" href="#quickstart">Quick start</a>
+      <a class="nav-link" href="#server">The server</a>
       <a class="nav-link" href="#first-brain">Build your first brain</a>
     </div>
 
@@ -63,6 +64,7 @@
       <a class="nav-link" href="#ontology">ontology</a>
       <a class="nav-link" href="#graph">graph</a>
       <a class="nav-link" href="#graphql">graphql</a>
+      <a class="nav-link" href="#viz">viz: the explorer</a>
     </div>
 
     <div class="nav-group">
@@ -73,6 +75,7 @@
 
     <div class="nav-group">
       <div class="nav-title">Reference</div>
+      <a class="nav-link" href="#benchmark">Benchmark: 2M nodes</a>
       <a class="nav-link" href="#layout">Layout &amp; config</a>
       <a class="nav-link" href="#cli">CLI cheat-sheet</a>
       <a class="nav-link" href="#reading">Further reading</a>
@@ -106,8 +109,10 @@
           <div class="row big"><span>State</span><b>plain Markdown on disk</b></div>
           <div class="row"><span>Structure</span><b>ECS ontology (T-box)</b></div>
           <div class="row"><span>Every write</span><b>schema-validated</b></div>
-          <div class="row"><span>Index</span><b>pglite + pgvector</b></div>
+          <div class="row"><span>Index</span><b>pglite + pgvector (HNSW)</b></div>
+          <div class="row"><span>Serving</span><b>resident server · ms queries at 2M+ nodes</b></div>
           <div class="row"><span>Retrieval</span><b>hybrid + graph + LLM</b></div>
+          <div class="row"><span>Explore</span><b>real-time WebGL graph viz</b></div>
           <div class="row"><span>Agents</span><b>typed tools over MCP</b></div>
           <div class="row"><span>Runtime</span><b>Bun + CoffeeScript</b></div>
           <div class="row big"><span>Your data leaves the machine?</span><b>never</b></div>
@@ -201,11 +206,39 @@ bun link              <span class="c"># register the global `brain` command</spa
   <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entity instances — the A-box (git-tracked)</span>
   <span class="f">schema.yaml</span>            <span class="c"># classes, attributes, relations — the T-box (git-tracked)</span>
   <span class="f">pgdata/</span>                <span class="c"># pglite index — rebuildable, gitignored</span></code></pre>
-      <div class="callout tip"><p><span class="lbl">The files are the source of truth.</span> The pglite index is a <em>cache</em>: mutations write the <code>.md</code> first, then reindex. You can always rebuild — and <code>git diff</code> — the whole graph from disk. Every commit is a fully-revisioned snapshot backup.</p></div>
 
-      <h3><span class="pill g">3</span> Ask for help anytime</h3>
+      <h3><span class="pill g">3</span> Index, then serve</h3>
+      <p>Disk is read in exactly one place — the explicit <code>reindex</code> — and queries are served by a resident <a href="#server">server</a> that holds the indexed graph in memory:</p>
+      <pre><button class="copy">copy</button><code>brain reindex          <span class="c"># the ONE .md → index path (required before the server will start)</span>
+brain server start &amp;   <span class="c"># the ONE process that owns pglite; serves every other command</span>
+brain search <span class="s">"anything"</span>  <span class="c"># instant thin-client CLI — milliseconds, even at millions of nodes</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">Two sources of truth, one at a time.</span> The <code>.md</code> files are the git-friendly, human-editable representation; <em>while the server runs, the index is authoritative</em> — writes land there first (instantly searchable) and <code>brain export</code> materializes them back to Markdown whenever you want a diff-able snapshot. You can always rebuild either side from the other.</p></div>
+
+      <h3><span class="pill g">4</span> Ask for help anytime</h3>
       <pre><button class="copy">copy</button><code>brain              <span class="c"># the grouped command list</span>
 brain help graph   <span class="c"># detailed usage + examples for any subcommand</span></code></pre>
+    </section>
+
+    <!-- ============================ SERVER ============================= -->
+    <section id="server">
+      <h2><span class="bullet"></span>The server <a class="anchor" href="#server">#</a></h2>
+      <p class="kicker">One process owns the database; everything else is a thin client</p>
+      <p><code>brain server start</code> runs the one long-lived process that opens pglite. It holds the fully-indexed graph resident for its entire lifetime, and every other invocation — CLI commands, <a href="#mcp">MCP</a>, the <a href="#viz">viz</a> — talks to it over a unix socket. That split buys three things at once:</p>
+      <div class="grid cols-3">
+        <div class="card"><h4>Instant CLI</h4><p class="muted">Clients don't open a database — they connect. Startup cost ≈ zero; invocations parallelize freely.</p></div>
+        <div class="card"><h4>Crash-proof</h4><p class="muted">Ctrl-C on any client is consequence-free; only the server touches <code>pgdata/</code>, and it closes cleanly on SIGINT/SIGTERM.</p></div>
+        <div class="card"><h4>Never a wrong answer</h4><p class="muted">During <code>reindex</code>/<code>export</code>/maintenance, queries <em>wait</em> behind the gate instead of reading a partial index. A stall beats a lie.</p></div>
+      </div>
+      <p>Exactly one server per <code>db/</code> is enforced by a <code>db/.lock</code> (PID + start time; stale locks are cleaned automatically). Maintenance is a set of subcommands you run manually or from your own scheduler:</p>
+      <pre><button class="copy">copy</button><code>brain server status       <span class="c"># PID, uptime, entity/link counts (cached), memory</span>
+brain server reindex      <span class="c"># rebuild the index in the running server (queries wait)</span>
+brain server components   <span class="c"># label connected components — enables O(1) "no path exists"</span>
+brain server vacuum       <span class="c"># VACUUM ANALYZE + refresh the cached size counters</span>
+brain server stop         <span class="c"># graceful shutdown (waits out in-flight maintenance)</span></code></pre>
+      <p>Two bulk on-ramps complement the explicit lifecycle:</p>
+      <pre><button class="copy">copy</button><code>brain load ./some-dataset --no-embed   <span class="c"># import an already-structured dataset (no LLM, optional no embeddings)</span>
+brain export --prune                   <span class="c"># materialize the live index back to .md (and drop files for removed entities)</span></code></pre>
+      <div class="callout note"><p><span class="lbl">Writes are index-first.</span> <code>set</code> / <code>new</code> / <code>link</code> / <code>rm</code> / MCP writes land in the server's live index and are <em>instantly searchable</em> — no reindex step. The <code>.md</code> snapshot updates when <em>you</em> run <code>export</code>. Bulk <code>ingest</code> remains a file-based maintenance flow: it writes Markdown, and an explicit <code>reindex</code> takes it live.</p></div>
     </section>
 
     <!-- ========================== FIRST BRAIN ========================== -->
@@ -242,9 +275,10 @@ brain link Team/atlas USES_SYSTEM System/ledger reason=<span class="s">"core dep
     <span class="f">reason</span>: core dependency
 <span class="k">---</span></code></pre>
 
-      <h3><span class="pill b">3</span> Validate, index, and ask</h3>
+      <h3><span class="pill b">3</span> Validate, index, serve, and ask</h3>
       <pre><button class="copy">copy</button><code>brain validate     <span class="c"># schema + lint check of every entity (exit 1 on error)</span>
 brain reindex      <span class="c"># rebuild the pglite index + embeddings from the .md files</span>
+brain server start &amp;                        <span class="c"># serve queries from the resident index</span>
 brain get Team/atlas --links               <span class="c"># read it back, incoming edges too</span>
 brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>   <span class="c"># find every such edge</span></code></pre>
       <div class="callout note"><p><span class="lbl">That's the entire mental model.</span> Everything else in brain — bulk ingest, refiners, component methods, the five query modes, MCP — is built on these two boxes and the one guarantee that <em>writes are validated</em>.</p></div>
@@ -419,9 +453,11 @@ brain call EntityJournal/jdoe Entry__add <span class="s">'msg: kicked off the mi
     <!-- ============================ SEARCH ============================= -->
     <section id="search">
       <h3><code>search</code> — hybrid retrieval</h3>
-      <p>Runs a keyword (<a href="https://www.postgresql.org/docs/current/textsearch.html">Postgres FTS</a>) query <strong>and</strong> a vector (<a href="https://github.com/pgvector/pgvector">pgvector</a> cosine) query in parallel, then fuses the two ranked lists with <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a> (RRF, <code>k=60</code>) — so a result that ranks well in <em>either</em> signal floats up without hand-tuned weights. It then does a <strong>1-hop relational expansion</strong>: top seeds pull in their typed neighbors, so structurally-adjacent entities surface even when their text didn't match.</p>
+      <p>Runs a keyword (<a href="https://www.postgresql.org/docs/current/textsearch.html">Postgres FTS</a>) query <strong>and</strong> a vector (<a href="https://github.com/pgvector/pgvector">pgvector</a> cosine, served by an <strong>HNSW</strong> ANN index) query in parallel, then fuses the two ranked lists with <a href="https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf">Reciprocal Rank Fusion</a> (RRF, <code>k=60</code>) — so a result that ranks well in <em>either</em> signal floats up without hand-tuned weights. It then does a <strong>1-hop relational expansion</strong>: top seeds pull in their typed neighbors, so structurally-adjacent entities surface even when their text didn't match.</p>
       <pre><button class="copy">copy</button><code>brain search <span class="s">"shared platform services"</span>             <span class="c"># ranked hybrid search</span>
-brain search --limit 5 --explain <span class="s">"payments platform"</span>  <span class="c"># top 5, per-stage rank attribution</span></code></pre>
+brain search --limit 5 --explain <span class="s">"payments platform"</span>  <span class="c"># top 5, per-stage rank attribution</span>
+brain search --strategy keyword --no-expand <span class="s">"ledger"</span>   <span class="c"># leanest path: FTS only, no fusion, no expansion</span></code></pre>
+      <p class="muted">Performance-minded callers can opt out of stages: <code>--strategy hybrid|keyword|vector</code> (a single strategy skips fusion; keyword-only also skips the embedding call entirely) and <code>--no-expand</code>.</p>
       <div class="callout note"><p><span class="lbl">Keywords + vectors, not either/or.</span> Keyword search demands you guess the exact words used at write time; vector search matches synonyms and paraphrases. Strong systems combine both — exact identifiers via FTS, fuzzy recall via embeddings — and let RRF pick the winners.</p></div>
     </section>
 
@@ -444,11 +480,13 @@ brain search --limit 5 --explain <span class="s">"payments platform"</span>  <sp
     <!-- ============================= GRAPH ============================= -->
     <section id="graph">
       <h3><code>graph</code> — structural pattern-match</h3>
-      <p>A fully deterministic, no-LLM structural query using a <a href="https://mermaid.js.org/">Mermaid</a>-ish edge syntax. Wildcards <code>*</code> / <code>**</code> / <code>***</code> match 1 / 2 / 3-degree connections; a concrete <code>Class/id</code> pins a position to a specific entity.</p>
+      <p>A fully deterministic, no-LLM structural query using a <a href="https://mermaid.js.org/">Mermaid</a>-ish edge syntax. Wildcards match N-degree connections: <code>*</code> / <code>**</code> / <code>***</code> are shorthand for 1 / 2 / 3 hops, and <code>*N</code> matches up to any N. A concrete <code>Class/id</code> pins a position to a specific entity. Traversal runs as batched, indexed SQL — one query per BFS hop for the whole frontier — so it stays fast at millions of nodes.</p>
       <pre><button class="copy">copy</button><code>brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>    <span class="c"># every Team→System usage edge</span>
 brain graph <span class="s">'* --> Person/jdoe --> *'</span>         <span class="c"># nodes within 1 degree of Person/jdoe</span>
-brain graph <span class="s">'* > Person/jdoe > *'</span>             <span class="c"># shorthand: '>' is the unlabeled '-->'</span></code></pre>
-      <div class="callout note"><p><span class="lbl">Ideal for audits.</span> Enumerating every subgraph that matches a <em>pattern</em> — orphan-hunting, "who uses what", policy checks — where you want exact, fast, reproducible results with no model in the loop.</p></div>
+brain graph <span class="s">'* > Person/jdoe > *'</span>             <span class="c"># shorthand: '>' is the unlabeled '-->'</span>
+brain graph <span class="s">'Person/jdoe *6> Team/atlas --shortest'</span>  <span class="c"># shortest path within 6 hops (early-exit bidirectional BFS)</span></code></pre>
+      <div class="callout note"><p><span class="lbl">Bounded, and honest about it.</span> Every traversal takes a <code>--max-nodes</code> circuit breaker (default 100000) and results carry <code>capped: true</code> when the cap — not the graph's natural edge — stopped the search, so callers can tell "that's everything" from "there's more." After <code>brain server components</code> has run, cross-component shortest-path queries return <code>no_path: different_components</code> in O(1) instead of exploring the hop budget.</p></div>
+      <div class="callout note"><p><span class="lbl">Ideal for audits.</span> Enumerating every subgraph that matches a <em>pattern</em> — orphan-hunting (<code>brain schema orphans</code> lists zero-relation entities on demand), "who uses what", policy checks — with exact, fast, reproducible results and no model in the loop.</p></div>
     </section>
 
     <!-- ============================ GRAPHQL ============================ -->
@@ -469,7 +507,22 @@ EOF
 <span class="p">  - slug: Person/asmith</span>
 <span class="p">    identity:</span>
 <span class="p">      name: Alan Smith</span></code></pre>
-      <div class="callout tip"><p><span class="lbl">An API-style read, not a search.</span> When you already know the entity and want a precise, shaped projection of specific fields plus its neighbors, <code>graphql</code> gives you exactly that — deterministically.</p></div>
+      <div class="callout tip"><p><span class="lbl">An API-style read, not a search.</span> When you already know the entity and want a precise, shaped projection of specific fields plus its neighbors, <code>graphql</code> gives you exactly that — deterministically. Nested hydration is level-batched (one SQL round-trip per selection depth, not per node), so projecting a 30,000-neighbor hub stays sub-second.</p></div>
+    </section>
+
+    <!-- ============================== VIZ ============================== -->
+    <section id="viz">
+      <h3><code>viz</code> — the real-time explorer</h3>
+      <p>The whole graph as a browser-based, game-style WebGL world: every entity is a point in a volumetric cloud, colored by <a href="#server">connected component</a> and sized by degree — 2M+ nodes at interactive frame rates. Edges are deliberately never drawn; clustering and color carry the structure, the way an accretion disk reveals gravity.</p>
+      <pre><button class="copy">copy</button><code>brain viz                <span class="c"># http://127.0.0.1:4321 — runs until Ctrl-C</span>
+brain viz --relayout     <span class="c"># recompute the cached layout after big ingests</span></code></pre>
+      <ul>
+        <li><strong>All five query modes</strong> in a floating search bar — <code>search</code> (with strategy chips), <code>think</code> / <code>ontology</code> (with an LLM model picker, a reasoning toggle, an include-my-selection toggle, and optional spoken answers), <code>graph</code> patterns, and <code>graphql</code> projections — results in a collapsible sidebar with per-query latency shown in ms.</li>
+        <li><strong>Game navigation</strong>: WASD fly, E/Q up/down, middle-mouse orbit, hold-Space pan, wheel dolly, click select, Ctrl+click multi-select, <code>F</code> to frame the selection, <code>⌂</code> to fly back out to the whole universe. An always-visible FPS histogram keeps rendering honest.</li>
+        <li><strong>2D/3D toggle</strong>: components are laid out as volumetric BFS shells around their hub ("mold grown in ballistic gel"); 2D flattens to the disk projection. Screen-space picking guarantees a click selects exactly the dot you see.</li>
+        <li><strong>Hot-reloadable</strong>: the HUD is an <a href="https://github.com/mikesmullin/m-js">m.js</a> component tree and the server pushes edits live — camera position, store state, and the loaded dataset all survive.</li>
+      </ul>
+      <div class="callout note"><p><span class="lbl">Architecture-true.</span> The viz is a thin client like everything else: layout and component labels are cached maintenance artifacts computed by the server; the browser fetches one binary point cloud and proxies every lookup through the same RPC surface the CLI uses.</p></div>
     </section>
 
     <hr class="div">
@@ -479,8 +532,8 @@ EOF
       <h2><span class="bullet"></span>Serving agents over MCP <a class="anchor" href="#mcp">#</a></h2>
       <p class="kicker">Use · the capstone — the ontology shapes the tool surface</p>
       <p>The final layer of the memory stack is how an agent is <em>allowed to act</em>. brain serves itself over the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> as a set of <strong>structured, typed tools</strong> — not one giant query DSL.</p>
-      <pre><button class="copy">copy</button><code>brain mcp     <span class="c"># stdio MCP server</span></code></pre>
-      <p>It exposes <code>search</code>, <code>think</code>, <code>ontology</code>, <code>graph</code>, <code>graphql</code>, <code>get_entity</code>, <code>put_entity</code>, <code>schema_methods</code>, and <code>method_invoke</code>. Crucially, <code>put_entity</code> validates before writing and returns validation/lint failures as tool errors — the <strong>sanctioned write path</strong> for agents, with no direct file edits.</p>
+      <pre><button class="copy">copy</button><code>brain mcp     <span class="c"># stdio MCP server (a thin adapter over the running brain server)</span></code></pre>
+      <p>It exposes <code>search</code>, <code>think</code>, <code>ontology</code>, <code>graph</code>, <code>graphql</code>, <code>get_entity</code>, <code>put_entity</code>, <code>delete_entity</code>, <code>schema_methods</code>, <code>method_invoke</code>, and <code>schema_orphans</code> — tool-for-tool identical to the CLI query surface, because both are thin adapters over one shared core (edits to one can never drift from the other). <code>put_entity</code> is the <strong>sanctioned write path</strong> for agents: it always persists to the live index (instantly searchable), and schema-validation issues come back as soft notices to fix up — an agent can store a partial fact now and repair it next turn, instead of losing it to a hard error.</p>
       <div class="callout why"><p><span class="lbl">Why structured tools beat a string DSL.</span> A structured tool call removes the grammar burden and exposes intent directly. Compare <code>ontology search "(:Team)-[:OWNS].role→: owner"</code> with a typed call <code>{ class: "Team", relation: "OWNS", relation_property: { role: "owner" } }</code>. Both are schema-dependent, but the typed one is far easier for an agent to produce correctly on the first try. This is the whole point of an MCP surface: shift the problem from brittle syntax to explicit, typed intent — and let the <em>ontology shape the tools the agent sees</em>.</p></div>
     </section>
 
@@ -505,6 +558,26 @@ EOF
 
     <hr class="div">
 
+    <!-- =========================== BENCHMARK =========================== -->
+    <section id="benchmark">
+      <h2><span class="bullet"></span>Benchmark: 2M nodes <a class="anchor" href="#benchmark">#</a></h2>
+      <p class="kicker">The Panama Papers, head-to-head with a native Postgres graph engine</p>
+      <p>brain's performance claims are measured, not vibes: the full ICIJ Offshore Leaks dataset (<strong>2,016,523 nodes / 3,339,267 relationship rows</strong>) loaded as a brain database and benchmarked question-for-question against <a href="https://github.com/Evokoa/pgGraph">pgGraph</a>, a CSR-based graph engine running inside a native PostgreSQL 17 server — while brain ran on single-threaded WASM pglite. Warm medians, identical seeds:</p>
+      <table>
+        <thead><tr><th>Question</th><th>brain</th><th>pgGraph</th></tr></thead>
+        <tbody>
+          <tr><td>Status / graph size</td><td><b>3.9 ms</b></td><td>47 ms</td></tr>
+          <tr><td>Two-hop neighborhood of a 36k-degree hub (capped 500)</td><td><b>58 ms</b></td><td>231 ms</td></tr>
+          <tr><td>Two-hop neighborhood, uncapped</td><td><b>334 ms</b> (36,846 nodes)</td><td>4,510 ms (96,546 nodes)</td></tr>
+          <tr><td>Point projection through the query DSL</td><td><b>6 ms</b></td><td>1,458–1,882 ms</td></tr>
+          <tr><td>Shortest path (1–3 hops)</td><td>64–66 ms</td><td><b>4.1 ms</b></td></tr>
+          <tr><td>Text search ("Mossack", ranked)</td><td>598 ms (hybrid + fusion)</td><td><b>193 ms</b> (contains scan)</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">Full methodology, parity caveats, and reproduction steps: <a href="https://github.com/mikesmullin/brain/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>. One-time costs on the same dataset: ETL 100 s · reindex 447 s · connected components 204 s · viz layout 13 s; the resident server idles at ~370 MB.</p>
+      <div class="callout why"><p><span class="lbl">The point isn't beating a native engine everywhere.</span> It's that a git-friendly, Markdown-backed, zero-external-service knowledge graph answers every question class in sub-second warm time at two million nodes — on an embedded WASM database. Load the same dataset yourself: <code>brain load</code> + the ETL script in the repo.</p></div>
+    </section>
+
     <!-- ============================= LAYOUT ============================ -->
     <section id="layout">
       <h2><span class="bullet"></span>Layout &amp; config <a class="anchor" href="#layout">#</a></h2>
@@ -514,6 +587,9 @@ EOF
   <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entities (A-box, git-tracked)</span>
   <span class="f">schema.yaml</span>            <span class="c"># the T-box (git-tracked)</span>
   <span class="f">pgdata/</span>                <span class="c"># pglite index (rebuildable → gitignored)</span>
+  <span class="f">config.yaml</span>            <span class="c"># optional: viz LLM model roster (`models:` list)</span>
+  <span class="f">viz/</span>                   <span class="c"># cached layout + component labels (rebuildable → gitignored)</span>
+  <span class="f">.lock</span> <span class="f">.sock</span>            <span class="c"># server singleton guard + unix socket (runtime, gitignored)</span>
 <span class="f">refiner/&lt;Class&gt;.coffee</span>    <span class="c"># optional per-class refiners (dataset-local)</span>
 <span class="f">components/&lt;Comp&gt;.coffee</span>  <span class="c"># optional component methods (dataset-local)</span></code></pre>
       <pre><button class="copy">copy</button><code><span class="c"># brain.yaml — defaults</span>
@@ -537,11 +613,12 @@ EOF
         <thead><tr><th>Group</th><th>Commands</th></tr></thead>
         <tbody>
           <tr><td>Create</td><td><code>init</code></td></tr>
-          <tr><td>Schema (T-box)</td><td><code>def component</code> · <code>def class</code> · <code>def relation</code> · <code>schema graph|uniq|components|classes|methods</code></td></tr>
+          <tr><td>Schema (T-box)</td><td><code>def component</code> · <code>def class</code> · <code>def relation</code> · <code>schema graph|uniq|components|classes|methods|orphans</code></td></tr>
           <tr><td>Data (A-box)</td><td><code>new</code> · <code>set</code> · <code>ls</code> · <code>link</code> · <code>get</code> · <code>rm</code> · <code>call</code></td></tr>
-          <tr><td>External data</td><td><code>ingest</code> · <code>enrich</code></td></tr>
-          <tr><td>Integrity</td><td><code>reindex</code> · <code>validate</code> · <code>refine</code></td></tr>
-          <tr><td>Query</td><td><code>search</code> · <code>think</code> · <code>ontology</code> · <code>graph</code> · <code>graphql</code></td></tr>
+          <tr><td>External data</td><td><code>ingest</code> · <code>enrich</code> · <code>load</code></td></tr>
+          <tr><td>Run</td><td><code>server start|stop|status|vacuum|reindex|export|components</code> · <code>reindex</code> · <code>export</code></td></tr>
+          <tr><td>Integrity</td><td><code>validate</code> · <code>refine</code></td></tr>
+          <tr><td>Query</td><td><code>search</code> · <code>think</code> · <code>ontology</code> · <code>graph</code> · <code>graphql</code> · <code>viz</code></td></tr>
           <tr><td>Serve</td><td><code>mcp</code></td></tr>
         </tbody>
       </table>
@@ -552,9 +629,12 @@ EOF
       <h2><span class="bullet"></span>Further reading <a class="anchor" href="#reading">#</a></h2>
       <ul>
         <li><a href="https://github.com/mikesmullin/brain">github.com/mikesmullin/brain</a> — the source, README, and <code>SKILL.md</code> (the agent-facing quick reference).</li>
+        <li><a href="https://github.com/mikesmullin/brain/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a> — the full Panama Papers benchmark: methodology, parity caveats, reproduction.</li>
         <li><a href="https://github.com/mikesmullin/ontology">ontology</a> — brain's predecessor (v1), where the T-box / A-box model started.</li>
         <li><a href="https://github.com/mikesmullin/agl">agl-ai</a> — the embeddings + chat + microagent framework brain builds on.</li>
-        <li><a href="https://modelcontextprotocol.io">Model Context Protocol</a> · <a href="https://pglite.dev">pglite</a> · <a href="https://github.com/pgvector/pgvector">pgvector</a> — the moving parts under the hood.</li>
+        <li><a href="https://github.com/mikesmullin/m-js">m-js</a> — the minimalist UI framework (+ HMR) behind the <a href="#viz">viz</a> HUD.</li>
+        <li><a href="https://github.com/Evokoa/pgGraph">pgGraph</a> — the CSR PostgreSQL graph engine whose design (and benchmark dataset) inspired brain's server architecture.</li>
+        <li><a href="https://modelcontextprotocol.io">Model Context Protocol</a> · <a href="https://pglite.dev">pglite</a> · <a href="https://github.com/pgvector/pgvector">pgvector</a> · <a href="https://threejs.org">three.js</a> — the moving parts under the hood.</li>
       </ul>
     </section>
 
