@@ -1,8 +1,8 @@
-# ls.coffee (command) — list A-box instances of a class, ls-style.
+# ls.coffee (command) — list A-box instances of a class, ls-style (via server).
 #   brain ls <Class>     entity ids (basenames) of a class, in columns, under a "Class/" header
 #   brain ls             all classes, grouped
 #   brain ls [...] --long   one full slug per line instead of columns
-import { loadWorld } from '../world.coffee'
+import { request } from '../client.coffee'
 import { parseArgs } from '../args.coffee'
 
 # ls-style column-major layout (fill down each column), left-indented.
@@ -26,21 +26,8 @@ columnize = (items, indent, width) ->
 
 export run = (argv, cwd = process.cwd()) ->
   { _, flags } = parseArgs(argv, { booleans: ['long'] })
-  world = await loadWorld(cwd)
-  clsArg = _[0]
-
-  byClass = {}
-  (byClass[e.cls] ?= []).push(e.id) for e in world.entities
-
-  classes = null
-  if clsArg
-    real = Object.keys(world.schema.classes or {}).find((c) -> c.toLowerCase() is clsArg.toLowerCase())
-    real or= Object.keys(byClass).find((c) -> c.toLowerCase() is clsArg.toLowerCase())
-    throw new Error("unknown class '#{clsArg}'") unless real
-    classes = [real]
-  else
-    classes = Object.keys(byClass).sort()
-
+  byClass = await request(cwd, 'ls', { class: _[0] or null })
+  classes = Object.keys(byClass).sort()
   width = process.stdout.columns or 80
   first = true
   for cls in classes

@@ -1,36 +1,26 @@
-# mcp.coffee — Model Context Protocol server over stdio (default) or http.
-# Exposes brain's read/query surfaces + a write path. This is the sanctioned way
-# for an external agent to use the brain (never direct file edits). put_entity
-# always persists; schema validation is reported as soft issues to fix up when
-# possible, not as a hard tool error that blocks storage.
+# mcp.coffee — Model Context Protocol server over stdio: a THIN ADAPTER over
+# the brain server's RPC surface. Every tool maps 1:1 onto the same core
+# method the CLI uses (adapter pattern — one implementation, two surfaces), so
+# a user in the terminal and an agent over MCP are equally productive and can
+# never drift apart. Requires a running `brain server` (it owns pglite).
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import yaml from 'js-yaml'
-import { loadWorld, resolveSlug } from './world.coffee'
-import { hybridSearch } from './search.coffee'
-import { think } from './think.coffee'
-import { ontologyQuery } from './ontology.coffee'
-import { runQuery } from './graphmatch.coffee'
-import { runGraphql } from './graphqlish.coffee'
-import { upsertEntity } from './upsert.coffee'
-import { parseSlug, formatSlug } from './slug.coffee'
-import { isRelationKey, removeEntityFile } from './storage.coffee'
-import { dirname } from 'path'
-import { applicableMethods, invokeMethod, signatureOf } from './components.coffee'
-import { Index } from './index.coffee'
-import { loadConfig } from './config.coffee'
+import { request, serverRunning, noServerError } from './client.coffee'
 
 TOOLS = [
   {
     name: 'search'
-    description: 'Hybrid (vector + keyword + RRF) search over the knowledge graph. Returns YAML results.'
+    description: 'Hybrid (vector + keyword + RRF) search over the knowledge graph. Returns YAML results. `strategy` opts out of fusion (keyword-only or vector-only); `expand: false` skips the 1-hop relational expansion.'
     inputSchema:
       type: 'object'
       properties:
         query: { type: 'string' }
         limit: { type: 'number' }
         explain: { type: 'boolean' }
+        strategy: { type: 'string', enum: ['hybrid', 'keyword', 'vector'] }
+        expand: { type: 'boolean' }
       required: ['query']
   }
   {
@@ -51,7 +41,7 @@ TOOLS = [
   }
   {
     name: 'graph'
-    description: 'Deterministic structural graph-match (Mermaid syntax), e.g. "Team -->|SUPPORTS| Product".'
+    description: 'Deterministic structural graph-match (Mermaid syntax), e.g. "Team -->|SUPPORTS| Product". Wildcards *N match up to N hops; add "--shortest" to a pattern to return only minimum-hop paths. Results include capped: true when a traversal limit (not the graph) ended the search.'
     inputSchema:
       type: 'object'
       properties: { pattern: { type: 'string' } }
@@ -75,7 +65,7 @@ TOOLS = [
   }
   {
     name: 'put_entity'
-    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Always writes the record even if schema validation fails; invalid writes succeed with a notice listing issues to fix when possible (overwrite=true).'
+    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Writes land in the live index immediately (searchable at once); schema validation is reported as soft issues, not a hard error (overwrite=true to replace an existing record). The .md file materializes on `brain export`.'
     inputSchema:
       type: 'object'
       properties:
@@ -86,7 +76,7 @@ TOOLS = [
   }
   {
     name: 'delete_entity'
-    description: 'Permanently remove an entity by slug (Class/id), e.g. Note/family-kids or Person/lsmullin. Deletes the .md file and drops it from the search index. Same as CLI `brain rm`. Does not cascade-delete other entities that only link to it.'
+    description: 'Remove an entity by slug (Class/id) from the live index, e.g. Note/family-kids or Person/lsmullin. Same as CLI `brain rm`. The .md file is removed on `brain export --prune`. Does not cascade-delete other entities that only link to it.'
     inputSchema:
       type: 'object'
       properties:
@@ -112,6 +102,11 @@ TOOLS = [
         params: { type: 'object' }
       required: ['slug', 'method']
   }
+  {
+    name: 'schema_orphans'
+    description: 'List entities with zero relations (in or out) — the connectivity check `validate` runs as a lint, available on demand.'
+    inputSchema: { type: 'object', properties: {}, required: [] }
+  }
 ]
 
 textResult = (obj) -> { content: [{ type: 'text', text: (if typeof obj is 'string' then obj else yaml.dump(obj, { lineWidth: 120, sortKeys: false, noRefs: true })) }] }
@@ -119,17 +114,16 @@ errorResult = (msg) -> { content: [{ type: 'text', text: msg }], isError: true }
 
 # Agent-facing put_entity outcome: always "saved" when write succeeded; invalid
 # schema is a soft notice, not isError.
-formatPutEntityResult = (entity, r) ->
+formatPutEntityResult = (r) ->
   base =
-    slug: entity.slug
-    path: r.path
+    slug: r.slug
     valid: r.valid isnt false
     warnings: r.warnings or []
   if r.valid isnt false
     return base
   reasons = r.validationErrors or []
   notice = [
-    "Record was created and persisted at #{r.path}, but it is considered INVALID for the following reasons:"
+    "Record was stored in the live index, but it is considered INVALID for the following reasons:"
     (reasons.map (m) -> "  - #{m}").join('\n') or '  - (unspecified validation errors)'
     ''
     'Fixing these is not mandatory for the data to be stored and persisted.'
@@ -140,109 +134,41 @@ formatPutEntityResult = (entity, r) ->
     validation_errors: reasons
     notice: notice
 
-contentToEntity = (slug, content) ->
-  { cls, id } = parseSlug(slug)
-  data = yaml.load(content) or {}
-  components = {}; relations = {}
-  for own k, v of data when k not in ['_class', '_id']
-    if isRelationKey(k)
-      relations[k] = (if Array.isArray(v) then v else [v]).map (t) -> if typeof t is 'string' then { _to: t } else t
-    else components[k] = v
-  { slug: formatSlug(cls, id), cls, id, components, relations, body: '' }
-
+# tool name -> RPC method + params mapping (1:1 with the CLI's calls)
 handleCall = (cwd, name, args) ->
   switch name
     when 'search'
-      textResult(await hybridSearch(cwd, args.query, { limit: args.limit or 10, explain: !!args.explain }))
+      textResult(await request(cwd, 'search', { query: args.query, limit: args.limit or 10, explain: !!args.explain, strategy: args.strategy or 'hybrid', expand: args.expand isnt false }))
     when 'think'
-      textResult(await think(cwd, args.question, { limit: args.limit or 8 }))
+      textResult(await request(cwd, 'think', { question: args.question, limit: args.limit or 8 }))
     when 'ontology'
-      textResult(await ontologyQuery(cwd, args.question))
+      textResult(await request(cwd, 'ontology', { question: args.question }))
     when 'graph'
-      textResult(await runQuery(cwd, args.pattern))
+      textResult(await request(cwd, 'graph', { pattern: args.pattern }))
     when 'graphql'
-      textResult(await runGraphql(cwd, args.query))
+      textResult(await request(cwd, 'graphql', { query: args.query }))
     when 'get_entity'
-      world = await loadWorld(cwd)
-      e = resolveSlug(world, args.slug)
-      return errorResult("not found: #{args.slug}") unless e
-      slug = e.slug
-      out = { slug: e.slug, components: e.components, relations: e.relations }
-      if args.include_links
-        out.incoming = ({ from: o.slug, rel } for o in world.entities for own rel, ts of (o.relations or {}) when ts.some((t) -> t._to is slug))
-      textResult(out)
+      textResult(await request(cwd, 'get_entity', { slug: args.slug, include_links: !!args.include_links }))
     when 'put_entity'
-      world = await loadWorld(cwd)
-      slug = parseSlug(args.slug).slug
-      return errorResult("#{slug} already exists (set overwrite=true to replace)") if world.bySlug[slug] and not args.overwrite
-      try
-        entity = contentToEntity(slug, args.content)
-        # Soft validation: always persist; report schema issues for optional fix-up.
-        r = await upsertEntity(world, entity, { strict: false })
-        # Keep pglite search in sync — .md is SoT but search previously lagged
-        # until a manual `brain reindex`, so Ada could "save" then fail recall.
-        try
-          cfg = await loadConfig(cwd)
-          idx = new Index(cwd)
-          await idx.open()
-          unless await idx.isIndexed()
-            # First write: build full index from disk (includes this entity).
-            world2 = await loadWorld(cwd)
-            await idx.reindex(world2, cfg.embed.model)
-          else
-            # Reload entity from disk so source path is set for the index row.
-            world2 = await loadWorld(cwd)
-            e2 = world2.bySlug[entity.slug] or entity
-            await idx.upsertEntity(e2, cfg.embed.model)
-          await idx.close()
-        catch idxErr
-          # Non-fatal: get_entity still works; search may lag until reindex.
-          process.stderr.write("brain mcp: index update failed after put_entity: #{idxErr.message}\n")
-        textResult formatPutEntityResult(entity, r)
-      catch err
-        errorResult("put_entity failed: #{err.message}")
+      textResult(formatPutEntityResult(await request(cwd, 'put_entity', { slug: args.slug, content: args.content, overwrite: !!args.overwrite })))
     when 'delete_entity'
-      world = await loadWorld(cwd)
-      e = resolveSlug(world, args.slug)
-      return errorResult("not found: #{args.slug}") unless e
-      try
-        # Prefer source path dir (multi-storage); fall back to class dir / primary.
-        storageDir = null
-        if e.source
-          suffix = "/#{e.cls}/#{e.id}.md"
-          storageDir = if e.source.endsWith(suffix) then e.source.slice(0, e.source.length - suffix.length) else dirname(dirname(e.source))
-        storageDir or= world.schema.classDirs?[e.cls]
-        storageDir or= world.primaryStorageDir
-        await removeEntityFile(storageDir, e.cls, e.id)
-        try
-          cfg = await loadConfig(cwd)
-          idx = new Index(cwd)
-          await idx.open()
-          if await idx.isIndexed()
-            await idx.removeEntity(e.slug)
-          await idx.close()
-        catch idxErr
-          process.stderr.write("brain mcp: index update failed after delete_entity: #{idxErr.message}\n")
-        textResult({ slug: e.slug, removed: true, path: e.source or "#{storageDir}/#{e.cls}/#{e.id}.md" })
-      catch err
-        errorResult("delete_entity failed: #{err.message}")
+      textResult(await request(cwd, 'delete_entity', { slug: args.slug }))
     when 'schema_methods'
-      world = await loadWorld(cwd)
-      cls = args.class
-      return errorResult("unknown class: #{cls}") unless world.schema.classes?[cls]
-      methods = await applicableMethods(cwd, world.schema, cls)
-      textResult("#{signatureOf(m.method, m.def)}#{if m.def.description then '  # ' + m.def.description else ''}" for m in methods)
+      res = await request(cwd, 'schema_methods', { class: args.class })
+      textResult("#{m.signature}#{if m.description then '  # ' + m.description else ''}" for m in res)
     when 'method_invoke'
-      world = await loadWorld(cwd)
-      e = resolveSlug(world, args.slug)
-      return errorResult("not found: #{args.slug}") unless e
-      r = await invokeMethod(cwd, world, e.slug, args.method, args.params or {})
+      r = await request(cwd, 'method_invoke', { slug: args.slug, method: args.method, params: args.params or {} })
       text = (if not r.success and r.error then "#{r.error}\n" else '') + (r.content or '')
       if r.success then textResult(text) else errorResult(text)
+    when 'schema_orphans'
+      textResult(await request(cwd, 'schema_orphans'))
     else
       errorResult("unknown tool: #{name}")
 
 export startStdio = (cwd = process.cwd()) ->
+  unless serverRunning(cwd)
+    process.stderr.write(noServerError(cwd).message + '\n')
+    return 1
   server = new Server({ name: 'brain', version: '0.1.0' }, { capabilities: { tools: {} } })
   server.setRequestHandler ListToolsRequestSchema, -> { tools: TOOLS }
   server.setRequestHandler CallToolRequestSchema, (req) ->
@@ -251,4 +177,5 @@ export startStdio = (cwd = process.cwd()) ->
     catch err
       errorResult("error: #{err.message}")
   await server.connect(new StdioServerTransport())
-  process.stderr.write("brain MCP server ready (stdio)\n")
+  process.stderr.write("brain MCP server ready (stdio) — proxying to brain server\n")
+  0

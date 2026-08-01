@@ -63,7 +63,7 @@ toStr = (v) -> if typeof v is 'string' then v else yaml.dump(v, { lineWidth: 120
 #   - on failure we keep `error` and `content` separate (no copying); if a failure
 #     supplies NEITHER, we fill `error` with a generic placeholder
 UNSPECIFIED = 'an unspecified error occurred'
-normalizeResult = (r) ->
+export normalizeResult = (r) ->
   return { success: true, content: 'ok' } unless r?
   unless typeof r is 'object' and ('success' of r)
     return { success: true, content: toStr(r) }

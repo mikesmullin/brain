@@ -27,4 +27,7 @@ export run = (argv, cwd = process.cwd()) ->
   console.log "  storage: #{p.storage}"
   console.log "  schema:  #{sp}"
   console.log "  pgdata:  #{p.pgdata} (gitignored)"
+  console.log 'next steps:'
+  console.log '  brain reindex        # build the index (required before the server will start)'
+  console.log '  brain server start   # serve queries (search/think/ontology/graph/graphql)'
   0

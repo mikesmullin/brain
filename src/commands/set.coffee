@@ -1,16 +1,16 @@
 # set.coffee — A-box (instance) mutations. `set` writes VALUES onto instances.
-#   set <Class/id> <alias.field>=<yamlScalar> ...       # property setter
-#   set --file <path> [--class <Class>]                 # file ingest
-#       .yaml  => deterministic mode (must validate)     (LLM mode: phase 8)
-import { loadWorld, resolveSlug } from '../world.coffee'
+#   set <Class/id> <alias.field>=<yamlScalar> ...       # property setter (live index, via server)
+#   set --file <path> [--class <Class>]                 # bulk file ingest (writes .md; reindex after)
+#       .yaml  => deterministic mode (must validate)     (LLM mode: extraction)
+#
+# Single-instance sets are pglite-first: they land in the running server's
+# live index immediately (searchable at once) and reach .md on `brain export`.
+# Bulk --file ingest is an out-of-band maintenance flow: it writes .md files
+# directly and requires an explicit `brain reindex` to go live.
+import { request } from '../client.coffee'
 import { parseArgs } from '../args.coffee'
-import { parseSlug, formatSlug } from '../slug.coffee'
 import { isRelationKey } from '../storage.coffee'
-import { upsertEntity } from '../upsert.coffee'
-import { batchUpsert } from '../upsert.coffee'
-import { canonicalizeIds, idFieldOf } from '../canonical.coffee'
-import { calcResolver } from '../refine.coffee'
-import { extractEntities } from '../extract.coffee'
+import { parseSlug, formatSlug } from '../slug.coffee'
 import { readFile } from 'fs/promises'
 import yaml from 'js-yaml'
 
@@ -39,52 +39,15 @@ docToEntity = (doc, clsHint) ->
   { slug, cls, id, components, relations, body: '' }
 
 setFileDeterministic = (world, filePath, clsHint, opts) ->
+  { batchUpsert } = await import('../upsert.coffee')
   text = await readFile(filePath, 'utf-8')
   docs = yaml.loadAll(text).filter (d) -> d?
   entities = (docToEntity(doc, clsHint) for doc in docs)
   await batchUpsert(world, entities, opts)
 
-# Apply `alias.field=value` (component) and `REL=Class/id` (relation) assignments onto an entity.
-applyAssignments = (world, entity, assignments) ->
-  for a in assignments
-    eq = a.indexOf('=')
-    throw new Error("assignment must be key=value, got '#{a}'") unless eq > 0
-    key = a.slice(0, eq)
-    rawVal = a.slice(eq + 1)
-    if isRelationKey(key)
-      target = resolveSlug(world, rawVal)?.slug or parseSlug(rawVal).slug
-      entity.relations[key] ?= []
-      entity.relations[key] = entity.relations[key].filter (t) -> t._to isnt target
-      entity.relations[key].push({ _to: target })
-    else
-      [alias, field] = key.split('.')
-      throw new Error("component assignment key must be alias.field, got '#{key}'") unless alias and field
-      entity.components[alias] ?= {}
-      entity.components[alias][field] = yaml.load(rawVal)
-  entity
-
-# `set <slug|Class> ...`:
-#   - <Class/id> updates (or creates) that exact instance.
-#   - <Class> (class-only) creates a new instance whose id is DERIVED from its idField
-#     (e.g. EntityJournal + `BELONGS_TO=Person/jdoe` -> EntityJournal/jdoe).
-export setInstance = (world, cwd, slugRaw, assignments) ->
-  if slugRaw.indexOf('/') > 0
-    { cls, id } = parseSlug(slugRaw)
-    existing = resolveSlug(world, slugRaw)
-    entity = if existing then JSON.parse(JSON.stringify(existing)) else { slug: formatSlug(cls, id).slug, cls, id, components: {}, relations: {}, body: '' }
-  else
-    cls = slugRaw
-    throw new Error("unknown class '#{cls}'") unless world.schema.classes?[cls]
-    throw new Error("class '#{cls}' has no idField; give an explicit id (#{cls}/<id>)") unless idFieldOf(world.schema, cls)
-    entity = { slug: null, cls, id: null, components: {}, relations: {}, body: '' }
-  applyAssignments(world, entity, assignments)
-  unless entity.id
-    await canonicalizeIds(world.schema, [entity], { calc: calcResolver(cwd) })
-    throw new Error("could not derive an id for #{cls} (idField unresolved — set the id-source field/relation, or give an explicit id)") unless entity.id
-  r = await upsertEntity(world, entity)
-  { slug: entity.slug, path: r.path, warnings: r.warnings }
-
 setFileLLM = (world, filePath, clsHint, opts) ->
+  { batchUpsert } = await import('../upsert.coffee')
+  { extractEntities } = await import('../extract.coffee')
   text = await readFile(filePath, 'utf-8')
   docs = await extractEntities(world.cwd, text, { schema: world.schema, class: clsHint, world })
   entities = []
@@ -95,8 +58,10 @@ setFileLLM = (world, filePath, clsHint, opts) ->
 
 export run = (argv, cwd = process.cwd()) ->
   { _, flags } = parseArgs(argv, { booleans: ['partial'] })
-  world = await loadWorld(cwd)
   if flags.file
+    # Bulk ingest stays a file-based maintenance flow (validated batch write).
+    { loadWorld } = await import('../world.coffee')
+    world = await loadWorld(cwd)
     filePath = flags.file
     isYaml = /\.ya?ml$/i.test(filePath)
     mode = if isYaml then 'deterministic' else 'LLM'
@@ -106,11 +71,12 @@ export run = (argv, cwd = process.cwd()) ->
     written = if isYaml then await setFileDeterministic(world, filePath, flags.class, opts) else await setFileLLM(world, filePath, flags.class, opts)
     console.log "ingested #{written.length} instance(s) [#{mode}]:"
     console.log "  ✓ #{r.slug}" for r in written
-    console.log "run `brain refine` to resolve incomplete entities, then `brain reindex`"
+    console.log "run `brain refine` to resolve incomplete entities, then `brain reindex` to go live"
   else
     slug = _[0]
     throw new Error("usage: set <slug|Class> <alias.field>=<value> | <REL>=<slug> ...  OR  set --file <path>") unless slug
-    r = await setInstance(world, cwd, slug, _.slice(1))
-    console.log "set #{r.slug} -> #{r.path}"
+    r = await request(cwd, 'set_instance', { slug, assignments: _.slice(1) })
+    console.log "set #{r.slug} (live index; run `brain export` to materialize .md)"
     console.log "  warning: #{w}" for w in (r.warnings or [])
+    console.log "  invalid: #{e}" for e in (r.validationErrors or [])
   0

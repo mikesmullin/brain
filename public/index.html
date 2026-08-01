@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- brain viz shell — static skeleton only.
+     The HUD is an m.js component tree (ui.js) mounted into #app; the three.js
+     world (scene.js) binds to the pre-existing #world canvas. Both are
+     re-imported with cache-busting by window.__M_BOOT__ on m.js HMR pushes
+     (see /__m_hmr in the viz server), so edits to /ui.js, /scene.js,
+     /styles.css, or /app.js hot-reload without losing camera or store state.
+     #world and #fps live OUTSIDE #app so M re-renders never touch them. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>brain viz</title>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<canvas id="world"></canvas>
+<canvas id="fps" width="120" height="24"></canvas>
+<div id="app"></div>
+<script type="module">
+  import '/vendor/m-js/src/hot-client.js'
+  window.__M_BOOT__ = async (t = 0) => {
+    const app = await import('/app.js?t=' + t)
+    await app.boot(t)
+  }
+  window.__M_BOOT__()
+</script>
+</body>
+</html>

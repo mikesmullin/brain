@@ -7,3 +7,8 @@ node_modules/
 # scratch
 *.log
 tmp/
+
+# brain server runtime state (per-db singleton guard + unix socket)
+db/pgdata/
+db/.lock
+db/.sock

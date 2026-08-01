@@ -2,12 +2,14 @@
 #   keyword(FTS) + vector  ->  RRF(k=60) fusion  ->  relational expansion
 #   ->  [cross-encoder rerank: PLACEHOLDER / config-gated no-op]
 #
+# Runs 100% against pglite (no disk reads, no world loads). The index must
+# already exist — building it is `brain reindex`, an explicit user action, and
+# is deliberately NOT triggered implicitly from here.
+#
 # NOTE: RRF is *fusion*, not a reranker. The cross-encoder rerank stage is a
 # deliberate placeholder (config `search.reranker`, default off) to be wired later.
-import { Index } from './index.coffee'
-import { loadConfig } from './config.coffee'
-import { loadWorld } from './world.coffee'
 import { embedOne } from './embed.coffee'
+import { NO_EMBED } from './index.coffee'
 
 RRF_K = 60
 
@@ -22,55 +24,61 @@ rrf = (lists) ->
       (contrib[slug] ?= {})[name] = i + 1   # 1-based rank
   { scores, contrib }
 
-export hybridSearch = (cwd, query, opts = {}) ->
+export hybridSearch = (core, query, opts = {}) ->
   limit = opts.limit or 10
-  cfg = await loadConfig(cwd)
-  # Authoritative world first — used to drop ghost hits from a stale index.
-  world = await loadWorld(cwd)
-  idx = new Index(cwd)
-  await idx.open()
+  strategy = opts.strategy or 'hybrid'   # hybrid | keyword | vector — opt out of fusion for full control
+  expand = opts.expand isnt false        # 1-hop relational expansion (opt out with expand: false)
+  throw new Error("unknown search strategy '#{strategy}' (hybrid|keyword|vector)") unless strategy in ['hybrid', 'keyword', 'vector']
+  idx = core.idx
   unless await idx.isIndexed()
-    console.error "search index missing; indexing #{world.entities.length} entities..."
-    await idx.reindex(world, cfg.embed.model)
+    throw new Error('no index found — run `brain reindex` first')
 
-  model = (await idx.meta('embed_spec')) or cfg.embed.model
-  qEmb = await embedOne(model, query)
-
+  spec = await idx.embedSpec()
+  throw new Error('vector strategy unavailable: this index was built with --no-embed') if strategy is 'vector' and spec is NO_EMBED
   pool = Math.max(limit * 4, 20)
-  vec = await idx.vectorSearch(qEmb, pool)
-  kw = await idx.keywordSearch(query, pool)
 
-  # Drop slugs that no longer exist on disk (stale pglite after rm/overwrite).
-  live = (slug) -> !!world.bySlug[slug]
-  vec = vec.filter (r) -> live(r.slug)
-  kw = kw.filter (r) -> live(r.slug)
+  vec = []
+  if strategy in ['hybrid', 'vector'] and spec isnt NO_EMBED
+    qEmb = await embedOne(spec, query)
+    vec = await idx.vectorSearch(qEmb, pool)
+  kw = if strategy in ['hybrid', 'keyword'] then await idx.keywordSearch(query, pool) else []
 
-  vecRanked = vec.map (r) -> r.slug
-  kwRanked = kw.map (r) -> r.slug
-  { scores, contrib } = rrf({ vector: vecRanked, keyword: kwRanked })
+  # RRF over whichever ranked lists the strategy produced (a single list keeps
+  # its native order — fusion only matters when both signals are present).
+  lists = {}
+  lists.vector = vec.map((r) -> r.slug) if vec.length
+  lists.keyword = kw.map((r) -> r.slug) if kw.length
+  { scores, contrib } = rrf(lists)
 
   # relational expansion: 1-hop neighbours of the top seeds carry relational_* meta.
-  seeds = Object.entries(scores).sort((a, b) -> b[1] - a[1]).slice(0, 5).map (x) -> x[0]
   relational = {}
-  for seed in seeds
-    for row in (await idx.outgoing(seed)).concat(await idx.incoming(seed))
-      nbr = if row.from_slug is seed then row.to_slug else row.from_slug
-      continue unless live(nbr)
-      continue if scores[nbr]   # already a direct hit
-      r = (relational[nbr] ?= { seed, hop: 1, path: [seed, nbr], via: [] })
-      r.via.push(row.rel) unless row.rel in r.via
-  # fold neighbours in with a small relational score
-  for own nbr, meta of relational
-    scores[nbr] = (scores[nbr] or 0) + 1 / (RRF_K + 20)
-    contrib[nbr] ?= {}
-    contrib[nbr].relational = meta.hop
+  if expand
+    seeds = Object.entries(scores).sort((a, b) -> b[1] - a[1]).slice(0, 5).map (x) -> x[0]
+    for seed in seeds
+      for row in (await idx.outgoing(seed)).concat(await idx.incoming(seed))
+        nbr = if row.from_slug is seed then row.to_slug else row.from_slug
+        continue if scores[nbr]   # already a direct hit
+        r = (relational[nbr] ?= { seed, hop: 1, path: [seed, nbr], via: [] })
+        r.via.push(row.rel) unless row.rel in r.via
+    # fold neighbours in with a small relational score
+    for own nbr, meta of relational
+      scores[nbr] = (scores[nbr] or 0) + 1 / (RRF_K + 20)
+      contrib[nbr] ?= {}
+      contrib[nbr].relational = meta.hop
 
   vecScore = {}; vecScore[r.slug] = r.score for r in vec
   ranked = Object.entries(scores).sort((a, b) -> b[1] - a[1]).slice(0, limit)
 
+  # previews (live component values) for the final page, one indexed query
+  slugs = (slug for [slug, _] in ranked)
+  previews = {}
+  if slugs.length
+    pr = await idx.db.query 'SELECT slug, components FROM entities WHERE slug = ANY($1)', [slugs]
+    for row in pr.rows
+      previews[row.slug] = if typeof row.components is 'string' then JSON.parse(row.components) else row.components
+
   results = []
   for [slug, base] in ranked
-    continue unless live(slug)
     rel = relational[slug]
     res =
       slug: slug
@@ -84,12 +92,7 @@ export hybridSearch = (cwd, query, opts = {}) ->
       res.relational_path = rel.path
       res.relational_via_link_types = rel.via
     if opts.explain
-      res.explain = { ranks: contrib[slug], reranker: cfg.search.reranker or 'off' }
-    # Live components from .md (index body may lag until embed updates)
-    if world.bySlug[slug]?.components
-      res.preview = world.bySlug[slug].components
+      res.explain = { ranks: contrib[slug], strategy, expand, reranker: core.cfg.search.reranker or 'off' }
+    res.preview = previews[slug] if previews[slug] and Object.keys(previews[slug]).length
     results.push res
-  results
-
-  await idx.close()
   results

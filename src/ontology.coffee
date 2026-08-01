@@ -1,48 +1,16 @@
 # ontology.coffee — LLM-driven typed relationship traversal.
 # A small tool-using agent (not a single-decision microagent): it may search and
 # traverse typed edges over several turns, then emit one typed answer. All graph
-# access is deterministic (tools); the model only decides where to look.
+# access is deterministic (indexed pglite queries — O(degree) per hop, never a
+# whole-world scan); the model only decides where to look.
 import Agent from 'agl-ai'
-import { loadWorld } from './world.coffee'
-import { loadConfig } from './config.coffee'
 import { hybridSearch } from './search.coffee'
+import { thinkPrefix, selectionContext } from './think.coffee'
 import { schemaGraph } from './schema.coffee'
 
-export ontologyQuery = (cwd, question, opts = {}) ->
-  cfg = await loadConfig(cwd)
-  world = await loadWorld(cwd)
-  sg = schemaGraph(world.schema)
-
-  neighbors = (slug, rel) ->
-    e = world.bySlug[slug]
-    return [] unless e
-    out = []
-    for own r, targets of (e.relations or {}) when (not rel or r is rel)
-      out.push({ dir: 'out', rel: r, nbr: t._to }) for t in targets
-    for other in world.entities
-      for own r, targets of (other.relations or {}) when (not rel or r is rel)
-        out.push({ dir: 'in', rel: r, nbr: other.slug }) for t in targets when t._to is slug
-    out
-
-  # Deterministic bidirectional BFS from `from` to every entity of class `toClass`
-  # within `maxHops`. Returns compact paths so the model can answer multi-hop in 1 call.
-  findPaths = (from, toClass, maxHops = 4) ->
-    results = []
-    seen = {}
-    seen[from] = true
-    queue = [{ slug: from, path: [from], via: [] }]
-    while queue.length and results.length < 60
-      cur = queue.shift()
-      hops = cur.path.length - 1
-      if cur.slug isnt from and world.bySlug[cur.slug]?.cls is toClass
-        results.push({ end: cur.slug, hops, path: cur.path, via: cur.via })
-      continue if hops >= maxHops
-      for row in neighbors(cur.slug)
-        continue if seen[row.nbr]
-        seen[row.nbr] = true
-        edge = if row.dir is 'out' then "#{row.rel}>" else "<#{row.rel}"
-        queue.push({ slug: row.nbr, path: cur.path.concat(row.nbr), via: cur.via.concat(edge) })
-    results
+export ontologyQuery = (core, question, opts = {}) ->
+  sg = schemaGraph(core.schema)
+  model = opts.model or core.cfg.think.model
 
   system = """
     You answer relational questions by traversing a typed knowledge graph.
@@ -73,8 +41,8 @@ export ontologyQuery = (cwd, question, opts = {}) ->
   """
 
   agent = await Agent.factory
-    model: cfg.think.model
-    system_prompt: system
+    model: model
+    system_prompt: thinkPrefix(model, opts.thinking) + system + selectionContext(opts.selection)
     parallel_tools: true
     reasoning_effort: 'medium'
     output_tool:
@@ -98,22 +66,22 @@ export ontologyQuery = (cwd, question, opts = {}) ->
   agent.Tool 'search', 'Hybrid search for seed entities by meaning/keywords. Returns slugs.',
     { query: { type: 'string' } }, ['query'],
     guard (ctx, { query }) ->
-      res = await hybridSearch(cwd, query, { limit: 8 })
+      res = await hybridSearch(core, query, { limit: 8 })
       JSON.stringify(res.map((r) -> r.slug))
 
-  agent.Tool 'paths', 'Bidirectional BFS: find all paths from `from` (a slug) to entities of class `to_class` within max_hops (default 4). Returns [{end, hops, path, via}].',
+  agent.Tool 'paths', 'Bidirectional BFS: find all paths from `from` (a slug) to entities of class `to_class` within max_hops (default 4). Returns {results: [{end, hops, path, via}], capped}.',
     { from: { type: 'string' }, to_class: { type: 'string' }, max_hops: { type: 'number' } }, ['from', 'to_class'],
     guard (ctx, { from, to_class, max_hops }) ->
-      JSON.stringify(findPaths(from, to_class, max_hops or 4))
+      JSON.stringify(await core.findPaths(from, to_class, max_hops or 4))
 
   agent.Tool 'neighbors', 'List typed relations (in + out) for an entity slug. Optional rel filter.',
     { slug: { type: 'string' }, rel: { type: 'string' } }, ['slug'],
-    guard (ctx, { slug, rel }) -> JSON.stringify(neighbors(slug, rel))
+    guard (ctx, { slug, rel }) -> JSON.stringify(await core.idx.neighbors(slug, rel))
 
   agent.Tool 'get', 'Get an entity\'s components and relations by slug.',
     { slug: { type: 'string' } }, ['slug'],
     guard (ctx, { slug }) ->
-      e = world.bySlug[slug]
+      e = await core.idx.fullEntity((await core.resolveSlug(slug)) or slug)
       if e then JSON.stringify({ slug: e.slug, components: e.components, relations: e.relations }) else JSON.stringify({ error: 'not found' })
 
   r = await agent.run prompt: "<question>#{question}</question>"

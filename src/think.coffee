@@ -1,10 +1,8 @@
 # think.coffee — search + LLM synthesis, as a single agl-ai microagent.
 # One decision (synthesize a grounded answer), one output tool, typed result.
-# All retrieval/formatting is deterministic; the model only synthesizes.
+# All retrieval/formatting is deterministic (pglite-only); the model only synthesizes.
 import Agent from 'agl-ai'
 import { hybridSearch } from './search.coffee'
-import { loadWorld } from './world.coffee'
-import { loadConfig } from './config.coffee'
 import { renderEntityText } from './index.coffee'
 
 SYSTEM = """
@@ -16,21 +14,32 @@ Rules:
 - Keep `answer` concise and directly responsive to the question.
 """
 
-export think = (cwd, question, opts = {}) ->
-  cfg = await loadConfig(cwd)
+# `<|think|>` prefix enables reasoning on lm-studio models (off by default —
+# performance-first). Only injected for that provider; other providers ignore
+# or would mis-handle the token, so it's gated on the model spec's prefix.
+export thinkPrefix = (model, thinking) ->
+  if thinking and String(model or '').startsWith('lm-studio:') then '<|think|>\n' else ''
+
+# Selection context (viz "include selection" toggle): tells the model which
+# entities the user currently has selected, so questions like "how are these
+# related?" resolve against the selection.
+export selectionContext = (selection) ->
+  if selection?.length then "\nthe user has selected: #{selection.join(', ')}" else ''
+
+export think = (core, question, opts = {}) ->
   limit = opts.limit or 8
-  results = await hybridSearch(cwd, question, { limit })
-  world = await loadWorld(cwd)
+  model = opts.model or core.cfg.think.model
+  results = await hybridSearch(core, question, { limit })
 
   blocks = for r in results
-    e = world.bySlug[r.slug]
+    e = await core.idx.fullEntity(r.slug)
     continue unless e
     "<entity slug=\"#{r.slug}\">\n#{renderEntityText(e)}\n</entity>"
   context = blocks.filter((b) -> b).join('\n')
 
   agent = await Agent.factory
-    model: cfg.think.model
-    system_prompt: SYSTEM
+    model: model
+    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + selectionContext(opts.selection)
     output_tool:
       name: 'answer'
       description: 'Report the synthesized, grounded answer with citations and gaps.'

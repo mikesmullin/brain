@@ -82,6 +82,7 @@ brain schema — inspect the T-box (schema)
   brain schema components [<Component>]  component(s): fields + methods
   brain schema classes [<Class>]         class(es): components (+ the top-class list)
   brain schema methods <Class>           component methods applicable to a class
+  brain schema orphans                   entities with zero relations (in or out)
 """
 
 export run = (argv, cwd = process.cwd()) ->
@@ -90,6 +91,21 @@ export run = (argv, cwd = process.cwd()) ->
   arg = _[1]
   unless sub
     console.log SCHEMA_HELP
+    return 0
+  # `orphans` is an index query (live pglite), not a schema.yaml read — the
+  # same connectivity check `validate` runs as a lint, available on demand.
+  if sub is 'orphans'
+    { serverRunning } = await import('../server.coffee')
+    if serverRunning(cwd)
+      { request } = await import('../client.coffee')
+      rows = await request(cwd, 'schema_orphans')
+    else
+      { Core } = await import('../core.coffee')
+      core = await new Core(cwd).init()
+      throw new Error('no index found — run `brain reindex` first') unless await core.isIndexed()
+      rows = await core.schemaOrphans()
+      await core.close()
+    console.log yaml.dump({ count: rows.length, orphans: (r.slug for r in rows) }, { sortKeys: false, lineWidth: 120 })
     return 0
   world = await loadWorld(cwd)
   schema = world.schema
@@ -124,5 +140,5 @@ export run = (argv, cwd = process.cwd()) ->
       names = if arg then [arg] else Object.keys(schema.classes or {})
       console.log await renderMethods(cwd, schema, names)
     else
-      throw new Error("unknown schema subcommand '#{sub}' (graph|uniq|components|classes|methods)")
+      throw new Error("unknown schema subcommand '#{sub}' (graph|uniq|components|classes|methods|orphans)")
   0

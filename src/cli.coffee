@@ -36,23 +36,29 @@ fill your data: (A-BOX / VALUES)
   call        invoke given component method on an entity
 
 work with external data:
-  ingest      recursively read .md docs, auto-creating entities and schema
+  ingest      recursively read .md docs, auto-creating entities and schema (LLM)
   enrich      rewrite .md docs with [[wiki-links]]
+  load        import an already-structured dataset (no LLM; benchmark/fixture/onboarding)
+
+run your brain: (SERVER MODE — queries need a running server)
+  server      start|stop|status|vacuum|reindex|export the long-running server
+  reindex     rebuild the pglite index from entity yaml on disk (.md -> index)
+  export      materialize the live index back to .md files (index -> .md)
 
 verify brain integrity:
-  reindex     rebuild in-memory pglite index from entity yaml on disk
   validate    report linter findings for all entities
   refine      complete + de-dupe entities via per-class refiners
 
-query your brain:
+query your brain: (all 5 run 100% against the in-memory index — milliseconds)
   search      hybrid vector+BM25+RRF (+rerank)
   think       search + final LLM synthesis (answer/citations/gaps)
   ontology    LLM-driven graph traversal (Natural language)
-  graph       deterministic pattern-match (Mermaid-ish syntax)
+  graph       deterministic pattern-match (Mermaid-ish syntax; *N wildcards, --shortest)
   graphql     deterministic traversal (GraphQL-ish syntax)
+  viz         real-time WebGL graph explorer in the browser
 
 host your brain for external AI:
-  mcp         launch MCP server
+  mcp         launch MCP server (thin adapter over the same brain server)
 
 for further help on any of these:
   help <subcommand>      list detailed args and examples
@@ -271,31 +277,122 @@ USAGE =
   """
   reindex: """
     Usage:
-        brain reindex
+        brain reindex [--no-embed]
 
     Description:
-        Rebuild the in-memory pglite index (+ embeddings) from the .md files on disk.
-      Search-dependent commands build the index automatically when it has never
-      been created; run this explicitly after source data changes to refresh it.
+        Rebuild the pglite index (+ embeddings) from the .md files on disk. This is
+        the ONE place disk is read — nothing else triggers indexing implicitly.
+        Run it once after cloning/loading a database (the server refuses to start
+        without an index), and again after out-of-band .md edits or bulk ingest.
+        Routes through the running server when one is up (queries wait); otherwise
+        runs standalone.
+
+    Options:
+        --no-embed   skip embeddings entirely (keyword+graph only; no provider calls —
+                     ideal for large benchmark datasets like the Panama Papers)
 
     Examples:
-        brain reindex   # rebuild the search index from the .md files on disk
+        brain reindex             # rebuild the index from the .md files on disk
+        brain reindex --no-embed  # ...without calling an embedding provider
+  """
+  export: """
+    Usage:
+        brain export [--prune]
+
+    Description:
+        Materialize the LIVE index back to .md files (the mirror image of reindex,
+        and the ONE place .md is written from the index). While the server runs,
+        pglite is authoritative and .md is a human-readable, git-friendly snapshot —
+        you decide when to take one. Overwrites .md from the index; reindex first
+        if you have un-indexed .md edits you want to keep.
+
+    Options:
+        --prune   also delete .md files for entities no longer in the index (after `rm`)
+
+    Examples:
+        brain export           # write every entity in the live index to .md
+        brain export --prune   # ...and delete .md files for removed entities
+  """
+  load: """
+    Usage:
+        brain load <path> [--no-embed]
+
+    Description:
+        Import an already-structured dataset (classes/components/relations already
+        resolved — no LLM extraction). <path> must contain schema.yaml and
+        <Class>/<id>.md dirs; files are copied into the active db/ (same-named
+        files overwritten), then the index is rebuilt. Use this for benchmark /
+        playground datasets, fixtures, and onboarding examples. For raw documents
+        that need LLM extraction into the ontology, use `ingest` instead.
+
+    Examples:
+        brain load ./panama-papers-db --no-embed   # load a pre-structured benchmark dataset
+  """
+  server: """
+    Usage:
+        brain server <start|stop|status|vacuum|reindex|export|components>
+
+    Description:
+        Manage the long-running brain server — the ONE process that owns pglite.
+        It holds the indexed graph resident in memory and serves every other brain
+        command (and MCP) over a unix socket, so CLI invocations start instantly,
+        parallelize freely, and are consequence-free to abort. Exactly one server
+        per db/ (guarded by db/.lock). During reindex/export, queries wait rather
+        than reading a partial index (a stall beats a wrong answer). Schedule the
+        maintenance subcommands externally (cron/crony) as needed.
+
+    Examples:
+        brain server start       # run the server in the foreground (use &, tmux, or a service manager)
+        brain server status      # PID, uptime, entity/link counts, memory
+        brain server reindex     # rebuild the index in the running server
+        brain server components  # label connected components (enables O(1) no-path answers + viz color)
+        brain server stop        # graceful shutdown (clean pglite close)
+  """
+  viz: """
+    Usage:
+        brain viz [--port N] [--relayout]
+
+    Description:
+        Real-time browser-based graph explorer: the whole graph as a WebGL point
+        cloud (no edge lines — clustering + component color carry the structure),
+        with a floating search bar (search / graph patterns), a collapsible
+        results sidebar, a 2D/3D toggle (3D = depth-from-hub "Christmas tree"),
+        an always-visible FPS histogram (top-right, reserved corner), and
+        game-style navigation: WASD fly, E/Q up/down, MMB orbit, Space+LMB pan,
+        wheel dolly, click select, numpad-. frame selection, 7/1/3 axis views.
+        Layout + components are cached maintenance artifacts computed by the
+        server on first run; this process just serves the page and proxies
+        lookups over RPC. Runs until Ctrl-C (consequence-free to kill).
+
+    Options:
+        --port       HTTP port (default: 4321)
+        --relayout   force layout recomputation (after big ingests/reindex)
+
+    Examples:
+        brain viz                # serve the explorer at http://127.0.0.1:4321
+        brain viz --relayout     # ...recomputing the cached layout first
   """
   search: """
     Usage:
-        brain search [--limit N] [--explain] <query>
+        brain search [--limit N] [--strategy hybrid|keyword|vector] [--no-expand] [--explain] <query>
 
     Description:
         Hybrid keyword (FTS) + vector search fused with Reciprocal Rank Fusion, plus a
-        1-hop relational expansion of the top seeds.
+        1-hop relational expansion of the top seeds. The default gives the best
+        recall; performance-fanatical callers can opt out of stages for finer
+        control (a single strategy skips fusion, and keyword-only also skips the
+        embedding provider call entirely).
 
     Options:
-        --limit     maximum results to return (default: 10)
-        --explain   print per-stage rank attribution
+        --limit      maximum results to return (default: 10)
+        --strategy   hybrid (default) | keyword (FTS only) | vector (semantic only)
+        --no-expand  skip the 1-hop relational expansion of top seeds
+        --explain    print per-stage rank attribution (+ strategy/expand used)
 
     Examples:
-        brain search "service ownership platform"              # ranked hybrid search
-        brain search --limit 5 --explain "payments platform"  # top 5, with per-stage rank attribution
+        brain search "service ownership platform"                    # ranked hybrid search
+        brain search --limit 5 --explain "payments platform"        # top 5, with per-stage rank attribution
+        brain search --strategy keyword --no-expand "Mossack"       # leanest path: FTS only, no fusion, no expansion
   """
   think: """
     Usage:
@@ -328,12 +425,21 @@ USAGE =
 
     Description:
         Deterministic structural graph-match using Mermaid-ish edge syntax. Wildcards
-        * / ** / *** match 1 / 2 / 3-degree connections.
+        match N-degree connections: * / ** / *** are shorthand for 1 / 2 / 3 hops;
+        *N matches up to N hops for any N. Add --shortest to return only the
+        minimum-hop path(s) found instead of every path within range. Add
+        --max-nodes to cap traversal size on large graphs; results are marked
+        capped: true if the cap (not the graph's natural edge) stopped the search.
+
+    Options:
+        --shortest    return only the shortest path(s), not every path within range
+        --max-nodes   stop after visiting this many nodes (default: 100000)
 
     Examples:
-        brain graph 'Team -->|USES_SYSTEM| System'    # path-find Teams to Systems via USES_SYSTEM edges
-        brain graph '* --> Person/jdoe --> *'         # nodes within 1 degree of the Person/jdoe entity
-        brain graph '* > Person/jdoe > *'             # shorthand: '>' is the unlabeled '-->'
+        brain graph 'Team -->|USES_SYSTEM| System'         # path-find Teams to Systems via USES_SYSTEM edges
+        brain graph '* --> Person/jdoe --> *'              # nodes within 1 degree of the Person/jdoe entity
+        brain graph '* > Person/jdoe > *'                  # shorthand: '>' is the unlabeled '-->'
+        brain graph 'Person/jdoe *6> Person/asmith --shortest'  # shortest path within 6 hops between two known entities
   """
   graphql: """
     Usage:
@@ -358,8 +464,10 @@ USAGE =
         brain mcp
 
     Description:
-        Launch the MCP server over stdio. Exposes tools: search, think, ontology, graph,
-        graphql, get_entity, put_entity, schema_methods, method_invoke.
+        Launch the MCP server over stdio — a thin adapter over the running brain
+        server (start that first). Exposes tools 1:1 with the CLI query/write
+        surface: search, think, ontology, graph, graphql, get_entity, put_entity,
+        delete_entity, schema_methods, method_invoke, schema_orphans.
 
     Examples:
         brain mcp   # serve the brain to an MCP client over stdio
@@ -404,6 +512,9 @@ COMMANDS =
   rm: './commands/rm.coffee'
   validate: './commands/validate.coffee'
   reindex: './commands/reindex.coffee'
+  export: './commands/export.coffee'
+  load: './commands/load.coffee'
+  server: './commands/server.coffee'
   refine: './commands/refine.coffee'
   search: './commands/search.coffee'
   ingest: './commands/ingest.coffee'
@@ -412,6 +523,7 @@ COMMANDS =
   think: './commands/think.coffee'
   ontology: './commands/ontology.coffee'
   graphql: './commands/graphql.coffee'
+  viz: './commands/viz.coffee'
   mcp: './commands/mcp.coffee'
   use: './commands/use.coffee'
 

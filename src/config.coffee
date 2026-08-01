@@ -43,6 +43,8 @@ export paths = (cwd = process.cwd()) ->
     config: join(dirname(root), 'brain.yaml')   # sibling of db/: <cwd>/brain.yaml
     storage: root                               # entities + schema live directly in <cwd>/db/
     pgdata: join(root, 'pgdata')
+    lock: join(root, '.lock')                   # brain server singleton guard (PID + start ts)
+    sock: join(root, '.sock')                   # brain server unix socket (JSON-RPC over NDJSON)
   }
 
 export DEFAULT_CONFIG =

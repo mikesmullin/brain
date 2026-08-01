@@ -8,7 +8,8 @@ export run = (argv, cwd = process.cwd()) ->
   { flags } = parseArgs(argv, { booleans: ['stdio', 'http'] })
   if flags.http
     throw new Error("--http transport is a later-phase placeholder; use stdio for now")
-  await startStdio(cwd)
+  code = await startStdio(cwd)
+  return code if code   # e.g. no brain server running
   # keep the process alive; stdio transport drives lifecycle
   await new Promise(->)
   0

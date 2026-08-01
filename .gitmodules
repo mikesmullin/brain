@@ -1,0 +1,3 @@
+[submodule "public/vendor/m-js"]
+	path = public/vendor/m-js
+	url = https://github.com/mikesmullin/m-js

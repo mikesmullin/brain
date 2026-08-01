@@ -1,7 +1,7 @@
-# graphql.coffee (command) — deterministic GraphQL-ish traversal.
+# graphql.coffee (command) — deterministic GraphQL-ish traversal via the server.
 #   graphql 'Team/team-cloud { naming, USES_SYSTEM { info } }'
 #   graphql < query.graphql            # read query from stdin (also when arg is '-')
-import { runGraphql } from '../graphqlish.coffee'
+import { request } from '../client.coffee'
 import { parseArgs } from '../args.coffee'
 import yaml from 'js-yaml'
 
@@ -18,6 +18,6 @@ export run = (argv, cwd = process.cwd()) ->
   # No query arg (or explicit '-') => read the query from stdin (handy with heredocs / pipes).
   query = (await readStdin()).trim() if not query or query is '-'
   throw new Error("usage: graphql '<Class/id> { field, REL { ... } }'  (or pipe/heredoc the query via stdin)") unless query
-  result = await runGraphql(cwd, query)
+  result = await request(cwd, 'graphql', { query })
   console.log yaml.dump(result, { lineWidth: 120, sortKeys: false, noRefs: true })
   0
