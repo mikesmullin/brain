@@ -138,14 +138,17 @@ export run = (argv, cwd = process.cwd()) ->
             json({ slug, i: (i ? -1) })
           when '/speak'
             # voice toggle: vocalize an LLM answer through Ada (`ada voice` —
-            # her configured preset + avatar closed captions). Fire-and-forget.
+            # her configured preset + avatar closed captions). Fire-and-forget;
+            # degrades gracefully when the `ada` CLI isn't installed (the
+            # client shows an install hint instead of failing silently).
             text = (url.searchParams.get('text') or '').slice(0, 4000)
             return json({ error: 'no text' }) unless text.trim()
+            return json({ error: 'ada_not_installed' }) unless Bun.which('ada')
             try
               Bun.spawn(['ada', 'voice', text], { stdout: 'ignore', stderr: 'ignore' })
               json({ ok: true })
             catch err
-              json({ error: "ada voice unavailable: #{err.message}" })
+              json({ error: "ada_failed: #{err.message}" })
           else
             serveStatic(url.pathname) or new Response('not found', { status: 404 })
       catch err

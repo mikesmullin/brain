@@ -41,6 +41,8 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
 .hit .meta { color: #8d8d95; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .answer { padding: 10px 12px; font-size: 13px; color: #dfe0e6; line-height: 1.45; }
 .answer.error { color: #ff9a9a; }
+.answer.warn { color: #f2cc8f; }
+.answer.warn a { color: #ffe17a; }
 #results pre { white-space: pre-wrap; word-break: break-word; color: #cfd0d6; margin: 6px; font-size: 11px; }
 #detail { max-height: 45%; overflow-y: auto; border-top: 1px solid rgba(255,255,255,.07); padding: 10px 12px; font-size: 12px; }
 #detail b { color: #9ecbff; }

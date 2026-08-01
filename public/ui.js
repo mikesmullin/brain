@@ -64,6 +64,9 @@ const TEMPLATE = `
   <div id="sidebar" :class="'panel ' + ($store.viz.collapsed ? 'collapsed' : '')">
     <header><span x-text="$store.viz.title"></span><span id="qms" x-text="$store.viz.ms"></span></header>
     <div id="results">
+      <div class="answer warn" x-show="$store.viz.speakWarning">🔇 please install
+        <a href="https://github.com/mikesmullin/ada" target="_blank" rel="noopener">ada</a>
+        to hear these results spoken aloud</div>
       <div class="answer error" x-show="$store.viz.error" x-text="$store.viz.error"></div>
       <div class="answer" x-show="$store.viz.answer" x-text="$store.viz.answer"></div>
       <pre x-show="$store.viz.json" x-text="$store.viz.json"></pre>
@@ -111,7 +114,7 @@ export async function boot() {
     thinking: !!saved.thinking,
     useSelection: !!saved.useSelection, selectedSlugs: [],
     speak: !!saved.speak,
-    collapsed: true, title: 'results', ms: '', error: '', answer: '', json: '',
+    collapsed: true, title: 'results', ms: '', error: '', answer: '', json: '', speakWarning: false,
     rows: [], detailSlug: '', detailJson: '', statusText: '', is3d: true,
     api: {},   // installed by scene.js: flyToNode, selectNode, setHighlights, setPath, frameUniverse, frameSelection, toggle3d
 
@@ -166,7 +169,7 @@ export async function boot() {
       this.qByMode[mode] = this.q
       this.persist()
       this.title = mode === 'think' || mode === 'ontology' ? 'thinking…' : 'searching…'
-      this.ms = ''; this.error = ''; this.answer = ''; this.json = ''; this.rows = []
+      this.ms = ''; this.error = ''; this.answer = ''; this.json = ''; this.rows = []; this.speakWarning = false
       this.collapsed = false
       const t0 = performance.now()
       const done = (label) => { this.title = label; this.ms = Math.round(performance.now() - t0) + ' ms' }
@@ -186,7 +189,12 @@ export async function boot() {
           if (res.error) throw new Error(res.error)
           done(mode)
           this.answer = res.answer || '(no answer)'
-          if (this.speak && res.answer) fetch('/speak?text=' + encodeURIComponent(res.answer)).catch(() => {})
+          if (this.speak && res.answer) {
+            fetch('/speak?text=' + encodeURIComponent(res.answer))
+              .then((r) => r.json())
+              .then((s) => { if (s.error) this.speakWarning = true })
+              .catch(() => { this.speakWarning = true })
+          }
           const nodes = (res.citation_nodes || res.entity_nodes || []).filter((x) => x.slug)
           this.api.setHighlights(nodes.filter((x) => x.i >= 0).map((x) => x.i))
           this.rows = nodes.map((x) => ({ kind: 'node', i: x.i, title: x.slug, sub: '' }))
