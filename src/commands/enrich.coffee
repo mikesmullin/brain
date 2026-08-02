@@ -12,12 +12,10 @@ import { readFile, writeFile, readdir, stat } from 'fs/promises'
 import { join, extname } from 'path'
 import Agent from 'agl-ai'
 import yaml from 'js-yaml'
-import { loadWorld } from '../world.coffee'
+import { loadSchemaContext } from '../world.coffee'
 import { loadConfig } from '../config.coffee'
 import { parseArgs } from '../args.coffee'
 import { describeSchema } from '../extract.coffee'
-import { hybridSearch } from '../search.coffee'
-import { batchUpsert } from '../upsert.coffee'
 import { parseSlug, formatSlug } from '../slug.coffee'
 import { isRelationKey } from '../storage.coffee'
 
@@ -70,10 +68,12 @@ buildEntity = (cls, id, front) ->
 
 enrichFile = (cwd, cfg, filePath, allowIngest) ->
   text = await readFile(filePath, 'utf-8')
-  world = await loadWorld(cwd)
+  # Schema only — search/create go through the live server (pglite), not loadWorld.
+  world = await loadSchemaContext(cwd)
   schemaDoc = describeSchema(world.schema)
   created = []
   wrote = { done: false }
+  { request } = await import('../client.coffee')
 
   agent = await Agent.factory
     model: cfg.think.model
@@ -91,7 +91,7 @@ enrichFile = (cwd, cfg, filePath, allowIngest) ->
   agent.Tool 'search', 'Search the knowledge graph for an existing entity by name/keywords. Returns candidate slugs.',
     { query: { type: 'string' } }, ['query'],
     (c, { query }) ->
-      res = await hybridSearch(cwd, query, { limit: 8 })
+      res = await request(cwd, 'search', { query, limit: 8 })
       yaml.dump(res, { lineWidth: 120, sortKeys: false, noRefs: true })
 
   if allowIngest
@@ -101,10 +101,14 @@ enrichFile = (cwd, cfg, filePath, allowIngest) ->
         try
           front = if args.frontmatter then (yaml.load(args.frontmatter) or {}) else {}
           e = buildEntity(args.class, args.id, front)
-          [res] = await batchUpsert(world, [e], { lenient: true })
-          world = await loadWorld(cwd)   # refresh so later tools see the new entity
-          created.push(res.slug)
-          "created #{res.slug}"
+          # Flattened YAML content for put_entity (pglite-first).
+          content = {}
+          content[k] = v for own k, v of (e.components or {})
+          for own rel, ts of (e.relations or {})
+            content[rel] = (t._to for t in ts)
+          await request(cwd, 'put_entity', { slug: e.slug, content: yaml.dump(content), overwrite: false })
+          created.push(e.slug)
+          "created #{e.slug}"
         catch err
           "error: #{err.message}"
 

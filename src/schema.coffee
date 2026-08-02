@@ -120,8 +120,14 @@ export entityDisplayName = (schema, entity, slug = null) ->
 
   s or entity?.slug or ''
 
+# Group thousands for display counts: 814344 → "814,344" (en-US style).
+export formatCount = (n) ->
+  num = Number(n) or 0
+  Math.trunc(num).toLocaleString('en-US')
+
 # A compact mermaid+yaml view of the schema graph (for `schema graph` / ontology).
-# When `counts` (class -> instance count) is given, names render as "Name (n)".
+# When `counts` (class -> instance count) is given, names render as "Name (n)"
+# with thousands separators (e.g. Entity (814,344)).
 #
 # Relations may omit domain/range (wildcard — common in bulk ETLs). Never render
 # the JS string "undefined"; fall back to the known class stubs joined by `|`
@@ -135,7 +141,7 @@ export schemaGraph = (schema, counts = null) ->
   edges = []
   for own rel, def of (schema.relations or {})
     edges.push("#{endpoint(def.domain)} -->|#{rel}| #{endpoint(def.range)}")
-  label = (name) -> if counts then "#{name} (#{counts[name] or 0})" else name
+  label = (name) -> if counts then "#{name} (#{formatCount(counts[name] or 0)})" else name
   {
     graph: edges.join('\n')
     top: (label(n) for n in topClasses(schema))

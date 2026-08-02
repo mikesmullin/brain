@@ -30,15 +30,23 @@ nextId = 0
 # One request over the unix socket; resolves with `result` or rejects with the
 # server's error. No client-side timeout by default: think/ontology legitimately
 # run LLM loops for a while, and maintenance gates can hold queries briefly.
-export request = (cwd, method, params = {}) ->
+connectRpc = (cwd) ->
   p = paths(cwd)
   # Live PID alone is not enough — sock may be gone after a crash (stale .lock).
   throw noServerError(cwd) unless serverRunning(cwd) and existsSync(p.sock)
   id = ++nextId
+  # Bun may throw ENOENT synchronously when the pipe path is missing
+  try
+    conn = net.connect p.sock
+  catch err
+    if isConnectGone(err) then throw noServerError(cwd) else throw err
+  { p, id, conn }
+
+export request = (cwd, method, params = {}) ->
+  { id, conn } = connectRpc(cwd)
   new Promise (resolve, reject) ->
     buffer = ''
     settled = false
-    conn = null
     fail = (err) ->
       return if settled
       settled = true
@@ -48,12 +56,6 @@ export request = (cwd, method, params = {}) ->
         reject(noServerError(cwd))
       else
         reject(err)
-    try
-      # Bun may throw ENOENT synchronously when the pipe path is missing
-      conn = net.connect p.sock
-    catch err
-      fail(err)
-      return
     conn.on 'error', fail
     conn.on 'connect', ->
       try
@@ -72,5 +74,70 @@ export request = (cwd, method, params = {}) ->
       catch err
         reject(err)
     conn.on 'close', -> fail(new Error('connection closed before response')) unless settled
+
+# Streaming RPC: server emits many NDJSON frames
+#   {id, item: ...} × N
+#   {id, done: true, result?}
+# onItem is awaited for each item as it arrives (no full-result buffer), so
+# callers can apply stdout backpressure. Resolves with the final `result`
+# (or undefined). Rejects on error / hangup. Destroying work mid-stream
+# (throw from onItem, Ctrl-C) tears down the socket so the server stops too.
+export requestStream = (cwd, method, params = {}, onItem) ->
+  { id, conn } = connectRpc(cwd)
+  new Promise (resolve, reject) ->
+    buffer = ''
+    settled = false
+    # Serialize async onItem handlers — data events can deliver many frames
+    # in one tick, and we must not interleave writes / skip backpressure.
+    pending = Promise.resolve()
+    fail = (err) ->
+      return if settled
+      settled = true
+      try conn?.destroy() catch then undefined
+      if isConnectGone(err)
+        reject(noServerError(cwd))
+      else
+        reject(err)
+    settle = (value) ->
+      return if settled
+      settled = true
+      try conn.end() catch then undefined
+      resolve(value)
+    enqueue = (fn) ->
+      pending = pending.then(-> fn()).catch (err) ->
+        fail(err)
+        undefined
+    conn.on 'error', fail
+    conn.on 'connect', ->
+      try
+        conn.write JSON.stringify({ id, method, params }) + '\n'
+      catch err
+        fail(err)
+    conn.on 'data', (chunk) ->
+      buffer += chunk.toString('utf8')
+      while (nl = buffer.indexOf('\n')) >= 0
+        line = buffer.slice(0, nl)
+        buffer = buffer.slice(nl + 1)
+        continue unless line.trim()
+        try
+          msg = JSON.parse(line)
+        catch err
+          fail(err)
+          return
+        if msg.error?
+          fail(new Error(msg.error))
+          return
+        if msg.item?
+          do (item = msg.item) ->
+            enqueue ->
+              return if settled
+              await onItem(item)
+        if msg.done
+          do (result = msg.result) ->
+            enqueue ->
+              return if settled
+              settle(result)
+          return
+    conn.on 'close', -> fail(new Error('connection closed before stream completed')) unless settled
 
 export { serverRunning }

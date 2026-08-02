@@ -9,5 +9,5 @@ export run = (argv, cwd = process.cwd()) ->
   maxPasses = if flags['max-passes'] then parseInt(flags['max-passes'], 10) else undefined
   r = await refineAll(cwd, { class: flags.class, maxPasses })
   console.log "refine: #{r.passes} pass(es) · #{r.refined} refined · #{r.created} created · #{r.renamed} renamed · #{r.deleted} deleted"
-  console.log "run `brain validate` and `brain reindex` to finish"
+  console.log "run `brain validate` to confirm (writes are live in pglite; `brain export` materializes .md)"
   0

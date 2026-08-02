@@ -104,11 +104,27 @@ export class Core
     e = await @idx.fullEntity(slug)
     serializeEntity(e)
 
+  # Case-insensitive schema class presence (CLI class args are often lowercase).
+  _schemaHasClass: (name) ->
+    return false unless name? and @schema?.classes?
+    return true if @schema.classes[name]?
+    l = String(name).toLowerCase()
+    for k of @schema.classes
+      return true if k.toLowerCase() is l
+    false
+
+  # Stream every instance as {cls, id} via onItem — does not build a byClass map.
+  # Used by the server's NDJSON stream for `brain ls` (2M+ entity graphs).
+  lsEach: (cls, onItem) ->
+    count = await @idx.listInstancesEach cls, (row) -> await onItem(row)
+    if cls and count is 0 and not @_schemaHasClass(cls)
+      throw new Error("unknown class '#{cls}'")
+    count
+
+  # Bulk collect (tests / small graphs). Prefer lsEach for large result sets.
   ls: (cls = null) ->
-    rows = await @idx.listInstances(cls)
-    throw new Error("unknown class '#{cls}'") if cls and rows.length is 0 and not @schema.classes?[cls]
     byClass = {}
-    (byClass[r.cls] ?= []).push(r.id) for r in rows
+    await @lsEach cls, (r) -> (byClass[r.cls] ?= []).push(r.id)
     byClass
 
   schemaMethods: (cls) ->
@@ -117,6 +133,65 @@ export class Core
     ({ signature: signatureOf(m.method, m.def), description: m.def.description or '' } for m in methods)
 
   schemaOrphans: -> await @idx.orphans()
+
+  # Stream orphans as {cls, id} (for CLI listing — same shape as lsEach).
+  schemaOrphansEach: (onItem) ->
+    await @idx.orphansEach (row) -> await onItem(row)
+
+  # T-box only (from server-resident schema — no entity .md load).
+  schemaInfo: ->
+    {
+      components: @schema.components or {}
+      classes: @schema.classes or {}
+      relations: @schema.relations or {}
+    }
+
+  # schema graph labels with live per-class counts from pglite.
+  schemaGraphView: ->
+    { schemaGraph } = await import('./schema.coffee')
+    counts = await @idx.classCounts()
+    g = schemaGraph(@schema, counts)
+    # Graph-wide totals: instance nodes, link edges, T-box component types.
+    stats = (await @idx.cachedCounts()) or await @idx.counts()
+    g.totals =
+      nodes: stats.entities
+      relationships: stats.links
+      components: Object.keys(@schema.components or {}).length
+    g
+
+  # Full-graph validate from pglite (batched). Never reads entity .md files.
+  validateAll: (opts = {}) ->
+    bySlug = await @idx.slugSet()
+    errors = []
+    warnings = []
+    n = 0
+    batch = []
+    BATCH = opts.batchSize or 500
+    flush = =>
+      return unless batch.length
+      map = await @idx.fullEntities(batch)
+      ents = (map[s] for s in batch when map[s])
+      res = validateData({ schema: @schema, entities: ents, bySlug, duplicates: [] }, { skipOrphans: true, lenient: !!opts.lenient })
+      errors.push(e) for e in res.errors
+      warnings.push(w) for w in res.warnings
+      n += ents.length
+      batch = []
+    await @idx.listInstancesEach null, (row) =>
+      batch.push(formatSlug(row.cls, row.id))
+      await flush() if batch.length >= BATCH
+    await flush()
+    # Orphan lint via SQL (same definition as validateData's degree check).
+    for row in await @idx.orphans()
+      warnings.push("orphan: #{row.slug} has no relations (incoming or outgoing)")
+    {
+      valid: errors.length is 0
+      errors
+      warnings
+      counts:
+        entities: n
+        classes: Object.keys(@schema.classes or {}).length
+        relations: Object.keys(@schema.relations or {}).length
+    }
 
   # Deterministic bidirectional BFS (global visited set, batched one SQL query
   # per hop) from `from` to every entity of class `toClass` within `maxHops`.

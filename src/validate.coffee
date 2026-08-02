@@ -145,9 +145,11 @@ export validateData = ({ schema, entities, bySlug, duplicates }, opts = {}) ->
             continue
           validateField(errors, e.slug, "#{rel}.#{qk}", qdef, qv, bySlug)
 
-  # orphan detection (lint warning): no incoming or outgoing relations at all
-  for e in entities
-    warnings.push("orphan: #{e.slug} has no relations (incoming or outgoing)") unless degree[e.slug]
+  # orphan detection (lint warning): no incoming or outgoing relations at all.
+  # Skip when validating a batch/subset (pglite path uses SQL orphans instead).
+  unless opts.skipOrphans
+    for e in entities
+      warnings.push("orphan: #{e.slug} has no relations (incoming or outgoing)") unless degree[e.slug]
 
   {
     valid: errors.length is 0

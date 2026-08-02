@@ -57,6 +57,8 @@ You may safely assume that a brain has already been selected for you, until you 
 ```sh
 brain use                 # list available brain aliases
 brain use example         # select a database named "example" (selection is persisted)
+brain use .               # register cwd (alias = basename; overwrites if present) and select it
+brain use --rm example    # forget a memorized alias (does not delete files)
 brain use none            # will expect a database in the cwd
 ```
 
@@ -220,7 +222,8 @@ brain new EntityJournal BELONGS_TO=Person/jdoe
 #   new EntityJournal/jdoe -> .../EntityJournal/jdoe.md
 ```
 
-**List instances** — `ls`-style, ids only, grouped by class:
+**List instances** — streamed entity-at-a-time, ids only, grouped by class
+(column-packed with a one-row buffer; `--long` for full slugs):
 
 ```sh
 brain ls EntityJournal

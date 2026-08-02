@@ -82,10 +82,12 @@ USAGE =
   """
   schema: """
     Usage:
-        brain schema <graph|uniq|components|classes|methods> [<name>]
+        brain schema <graph|uniq|components|classes|methods|orphans> [<name>]
+        brain schema orphans [--long]
 
     Description:
         Inspect the T-box (schema). With no <name>, most subcommands print everything.
+        `orphans` lists entities with zero relations (streamed like `brain ls`).
 
     Subcommands:
         graph                yaml+mermaid graph view (with per-class counts)
@@ -93,11 +95,14 @@ USAGE =
         components [<Comp>]  component(s): their fields + methods
         classes    [<Class>] class(es): their components / top / idField
         methods    [<Class>] component methods applicable to a class
+        orphans              entities with no relations (columns; --long = full slugs)
 
     Examples:
         brain schema graph                   # whole schema as a mermaid graph (+ per-class counts)
         brain schema classes Person          # show just the Person class definition
         brain schema methods EntityJournal   # methods callable on EntityJournal entities
+        brain schema orphans                 # orphan ids, column-packed by class
+        brain schema orphans --long          # full Class/id slugs, one per line
   """
   def: """
     Usage:
@@ -155,13 +160,16 @@ USAGE =
         brain ls [<Class>] [--long]
 
     Description:
-        List instance ids, ls-style, grouped by class. With no class, list every class.
+        Stream instance ids, grouped by class. Safe on multi-million-node
+        graphs: entities are written as they arrive; column packing only
+        buffers one terminal row (~screen-width / id-width items). Ctrl-C
+        aborts mid-stream.
 
     Options:
-        --long   print full <Class>/<id> slugs, one per line
+        --long   print full <Class>/<id> slugs, one per line (no columns)
 
     Examples:
-        brain ls                # ids of every class, grouped
+        brain ls                # ids of every class, column-packed
         brain ls Person         # ids of just the Person class
         brain ls Person --long  # full Person/<id> slugs, one per line
   """
@@ -474,9 +482,11 @@ USAGE =
   """
   use: """
     Usage:
-      brain use
-      brain use <alias>
-      brain use none
+      brain use                         # list available brains
+      brain use <alias>                 # select a memorized brain
+      brain use .                       # register + select cwd (basename = alias)
+      brain use none                    # use the cwd-local db/
+      brain use --rm <alias>            # forget a memorized alias
 
     Description:
         List configured brains, or persistently select one for subsequent
@@ -484,10 +494,12 @@ USAGE =
         as alias: project-root entries; the selected alias is stored as
         `current`. Each project root must contain a `db/` directory.
 
-    Examples:
-        brain use                         # list available brains
-        brain use mydb1                   # select the mydb1 brain
-        brain use none                    # return to the cwd-local db
+        `brain use .` registers the current directory (alias = directory
+        basename) then selects it. If that alias already exists, its path
+        mapping is overwritten to the current directory.
+
+        `brain use --rm <alias>` removes a memorized alias from the list
+        (does not delete any files). If it was selected, current becomes none.
     """
 
 

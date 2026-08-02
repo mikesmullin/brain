@@ -1,14 +1,11 @@
 # validate.coffee (command) — validate + lint all instances against the schema.
-import { loadWorld } from '../world.coffee'
-import { validateData } from '../validate.coffee'
+# Runs entirely against the live pglite index via the brain server (no entity .md load).
+import { request } from '../client.coffee'
 import { parseArgs } from '../args.coffee'
 
 export run = (argv, cwd = process.cwd()) ->
   { flags } = parseArgs(argv, { booleans: ['quiet'] })
-  world = await loadWorld(cwd)
-  for pe in (world.parseErrors or [])
-    console.error "parse error: #{pe.source}: #{pe.error}"
-  res = validateData(world)
+  res = await request(cwd, 'validate', {})
   unless flags.quiet
     console.log "#{res.counts.entities} entities · #{res.counts.classes} classes · #{res.counts.relations} relations"
   if res.warnings.length

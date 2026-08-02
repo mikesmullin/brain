@@ -59,9 +59,11 @@ setFileLLM = (world, filePath, clsHint, opts) ->
 export run = (argv, cwd = process.cwd()) ->
   { _, flags } = parseArgs(argv, { booleans: ['partial'] })
   if flags.file
-    # Bulk ingest stays a file-based maintenance flow (validated batch write).
-    { loadWorld } = await import('../world.coffee')
-    world = await loadWorld(cwd)
+    # Bulk file ingest: read the *input* file only. Schema from schema.yaml;
+    # never loadWorld (that walks every entity .md). Writes still land as .md
+    # for reindex to pick up — prefer single-entity `set` for live pglite writes.
+    { loadSchemaContext } = await import('../world.coffee')
+    world = await loadSchemaContext(cwd)
     filePath = flags.file
     isYaml = /\.ya?ml$/i.test(filePath)
     mode = if isYaml then 'deterministic' else 'LLM'

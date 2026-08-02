@@ -2,7 +2,10 @@
 #
 # `brain server start` holds the fully-indexed graph resident for its whole
 # lifetime and serves every other `brain` invocation (and MCP) over a unix
-# socket carrying NDJSON JSON-RPC ({id, method, params} -> {id, result|error}).
+# socket carrying NDJSON JSON-RPC:
+#   request:  {id, method, params}
+#   reply:    {id, result|error}                         (most methods)
+#   stream:   {id, item} × N  then  {id, done, result?}  (ls — entity-at-a-time)
 #
 # Guarantees:
 #   - Exactly one server (and one pglite) per db/: guarded by db/.lock
@@ -114,6 +117,38 @@ releaseLockIfOwned = (cwd) ->
 # Methods that mutate/replace the whole index. They run exclusively: queued
 # behind in-flight work, and all other requests queue behind them.
 MAINTENANCE = new Set(['reindex', 'export', 'vacuum', 'components', 'viz_layout'])
+
+# Methods that reply with many NDJSON lines ({id, item}, …, {id, done}) instead
+# of a single {id, result}. Keeps multi-million-row listings off the heap.
+STREAM = new Set(['ls', 'schema_orphans'])
+
+# Write one NDJSON frame; honor socket backpressure so a slow client doesn't
+# unbounded-buffer the server. Resolves false if the client is already gone.
+writeFrame = (conn, payload) ->
+  return false if conn.destroyed
+  data = JSON.stringify(payload) + '\n'
+  try
+    unless conn.write(data)
+      await new Promise (resolve, reject) ->
+        onDrain = ->
+          cleanup()
+          resolve()
+        onClose = ->
+          cleanup()
+          resolve()   # client gone — not an error for the stream producer
+        onErr = ->
+          cleanup()
+          resolve()
+        cleanup = ->
+          conn.off 'drain', onDrain
+          conn.off 'close', onClose
+          conn.off 'error', onErr
+        conn.on 'drain', onDrain
+        conn.on 'close', onClose
+        conn.on 'error', onErr
+    true
+  catch
+    false
 
 export class BrainServer
   constructor: (@cwd = process.cwd()) ->
@@ -264,12 +299,46 @@ export class BrainServer
     respond = (payload) ->
       try conn.write JSON.stringify(Object.assign({ id }, payload)) + '\n'
     try
-      result = await @dispatch(method, params or {})
-      respond { result }
-      if method is 'stop'
-        setTimeout (=> @shutdown()), 10
+      if STREAM.has(method)
+        await @dispatchStream method, params or {}, id, conn
+      else
+        result = await @dispatch(method, params or {})
+        respond { result }
+        if method is 'stop'
+          setTimeout (=> @shutdown()), 10
     catch err
+      # Streaming already wrote frames; only emit error if the socket lives.
+      return if conn.destroyed or err.code is 'CLIENT_GONE'
       respond { error: err.message or String(err) }
+
+  # Stream methods: emit {id, item} frames then a final {id, done, result}.
+  # Client disconnect (Ctrl-C) stops the producer mid-walk — no full materialize.
+  dispatchStream: (method, params, id, conn) ->
+    await @maintenance if @maintenance
+    clientGone = ->
+      err = new Error('client disconnected')
+      err.code = 'CLIENT_GONE'
+      err
+    streamRows = (eachFn) ->
+      count = 0
+      try
+        await eachFn (row) ->
+          throw clientGone() if conn.destroyed
+          ok = await writeFrame conn, { id, item: { cls: row.cls, id: row.id } }
+          throw clientGone() unless ok
+          count++
+      catch err
+        return if err.code is 'CLIENT_GONE' or conn.destroyed
+        throw err
+      return if conn.destroyed
+      await writeFrame conn, { id, done: true, result: { count } }
+    switch method
+      when 'ls'
+        await streamRows (onRow) => @core.lsEach(params.class or null, onRow)
+      when 'schema_orphans'
+        await streamRows (onRow) => @core.schemaOrphansEach(onRow)
+      else
+        throw new Error("unknown stream method: #{method}")
 
   # Correctness over uptime: queries wait out maintenance; maintenance ops
   # chain behind each other.
@@ -394,9 +463,12 @@ export class BrainServer
       when 'graphql' then await core.graphql(params.query)
       when 'get_entity' then await core.getEntity(params.slug, !!params.include_links)
       when 'render_entity' then { slug: params.slug, text: await core.renderEntity(params.slug) }
-      when 'ls' then await core.ls(params.class or null)
+      # `ls` is a STREAM method (see dispatchStream) — not served as a bulk result.
       when 'schema_methods' then await core.schemaMethods(params.class)
-      when 'schema_orphans' then await core.schemaOrphans()
+      # schema_orphans is a STREAM method (see dispatchStream)
+      when 'schema_info' then await core.schemaInfo()
+      when 'schema_graph' then await core.schemaGraphView()
+      when 'validate' then await core.validateAll({ lenient: !!params.lenient })
       # writes — pglite-first; .md is materialized by `export`
       when 'put_entity' then await core.putEntity(params.slug, params.content, !!params.overwrite)
       when 'delete_entity' then await core.deleteEntity(params.slug)

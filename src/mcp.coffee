@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import yaml from 'js-yaml'
-import { request, serverRunning, noServerError } from './client.coffee'
+import { request, requestStream, serverRunning, noServerError } from './client.coffee'
 
 TOOLS = [
   {
@@ -161,7 +161,11 @@ handleCall = (cwd, name, args) ->
       text = (if not r.success and r.error then "#{r.error}\n" else '') + (r.content or '')
       if r.success then textResult(text) else errorResult(text)
     when 'schema_orphans'
-      textResult(await request(cwd, 'schema_orphans'))
+      # Stream accumulates into a bulk list for the MCP tool result.
+      rows = []
+      await requestStream cwd, 'schema_orphans', {}, (item) ->
+        rows.push({ slug: "#{item.cls}/#{item.id}", cls: item.cls })
+      textResult({ count: rows.length, orphans: (r.slug for r in rows) })
     else
       errorResult("unknown tool: #{name}")
 

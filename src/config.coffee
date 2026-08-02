@@ -41,6 +41,67 @@ export saveBrainsConfig = (brains) ->
 # Alias values point at the project root (parent of db/); brainRoot is the db/.
 export projectRootFromDb = (dbRoot) -> dirname(resolve(dbRoot))
 
+# Sanitize a project directory basename into a brains.yaml alias key.
+brainAliasFromProject = (projectRoot) ->
+  base = basename(projectRoot).replace(/[^\w.-]+/g, '-') or 'brain'
+  # Avoid clobbering the reserved `current` key if someone names a dir that.
+  if base is 'current' then 'brain' else base
+
+# Register a project root (directory that contains db/) under an alias in
+# brains.yaml. Alias = project-directory basename.
+#
+# Default (overwrite: false): reuses an existing alias if the same path is
+# already listed; on basename collision uses -2/-3… suffixes (safe for
+# auto-registration via ensureBrainRegistered).
+#
+# overwrite: true (brain use .): always binds the basename alias to this
+# path, replacing any previous mapping for that alias.
+#
+# Does NOT change `current`. Returns { alias, brains, created, updated }.
+export registerBrainProject = (projectRoot, opts = {}) ->
+  projectRoot = resolve(projectRoot)
+  dbRoot = join(projectRoot, 'db')
+  unless existsSync(dbRoot)
+    throw new Error("not a brain project (no db/): #{projectRoot}")
+
+  brains = loadBrainsConfig()
+  overwrite = opts.overwrite is true
+  base = brainAliasFromProject(projectRoot)
+
+  unless overwrite
+    for name, path of brains when name isnt 'current' and typeof path is 'string'
+      try
+        if resolve(resolveBrainProjectPath(path)) is projectRoot
+          return { alias: name, brains, created: false, updated: false }
+      catch
+        continue
+
+    alias = base
+    n = 2
+    while Object.prototype.hasOwnProperty.call(brains, alias)
+      alias = "#{base}-#{n}"
+      n++
+
+    brains[alias] = projectRoot
+    saveBrainsConfig(brains)
+    return { alias, brains, created: true, updated: false }
+
+  # overwrite: always use basename; replace path if the alias already exists.
+  alias = base
+  if Object.prototype.hasOwnProperty.call(brains, alias) and typeof brains[alias] is 'string'
+    try
+      if resolve(resolveBrainProjectPath(brains[alias])) is projectRoot
+        return { alias, brains, created: false, updated: false }
+    catch
+      # fall through and rewrite the mapping
+    brains[alias] = projectRoot
+    saveBrainsConfig(brains)
+    return { alias, brains, created: false, updated: true }
+
+  brains[alias] = projectRoot
+  saveBrainsConfig(brains)
+  { alias, brains, created: true, updated: false }
+
 # If the resolved db/ isn't already listed under any alias in brains.yaml,
 # add it (alias = project-directory basename, with -2/-3… on collision).
 # Does NOT change `current`. Best-effort: never throws into the caller —
@@ -51,25 +112,7 @@ export ensureBrainRegistered = (cwd = process.cwd()) ->
     dbRoot = resolve(brainRoot(cwd))
     return unless existsSync(dbRoot)
     projectRoot = projectRootFromDb(dbRoot)
-
-    brains = loadBrainsConfig()
-    for name, path of brains when name isnt 'current' and typeof path is 'string'
-      try
-        return name if resolve(resolveBrainProjectPath(path)) is projectRoot
-      catch
-        continue
-
-    base = basename(projectRoot).replace(/[^\w.-]+/g, '-') or 'brain'
-    # Avoid clobbering the reserved `current` key if someone names a dir that.
-    base = 'brain' if base is 'current'
-    alias = base
-    n = 2
-    while Object.prototype.hasOwnProperty.call(brains, alias)
-      alias = "#{base}-#{n}"
-      n++
-
-    brains[alias] = projectRoot
-    saveBrainsConfig(brains)
+    { alias } = registerBrainProject(projectRoot)
     alias
   catch err
     if process.env.DEBUG

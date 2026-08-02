@@ -2,7 +2,7 @@
 #   ingest <dir> [--extract Class ...]   LLM extraction into .brain/storage
 #   ingest <dir> --suggest               dry-run: print recommended new schema
 # (Markdown-only for v1; pdf/docx/other formats are a later-phase placeholder.)
-import { loadWorld } from '../world.coffee'
+import { loadSchemaContext } from '../world.coffee'
 import { parseArgs, asArray } from '../args.coffee'
 import { extractEntities, suggestSchema } from '../extract.coffee'
 import { batchUpsert } from '../upsert.coffee'
@@ -48,7 +48,8 @@ export run = (argv, cwd = process.cwd()) ->
   excludes = asArray(flags.exclude)
   files = await mdFiles(dir, excludes)
   throw new Error("no .md files found under #{dir}") unless files.length
-  world = await loadWorld(cwd)
+  # Schema only — never loadWorld (entity .md scan). Input docs are external.
+  world = await loadSchemaContext(cwd)
 
   if flags.suggest
     text = (for f in files then await readFile(f, 'utf-8')).join('\n\n---\n\n')
@@ -73,7 +74,8 @@ export run = (argv, cwd = process.cwd()) ->
       res = await batchUpsert(w, entities, { lenient: true })
       written += res.length
       console.log "  ✓ #{r.slug}  (from #{f})" for r in res
-      w = await loadWorld(cwd)
+      # Refresh schema context only (T-box); A-box stays empty until reindex.
+      w = await loadSchemaContext(cwd)
     catch err
       console.log "  ✗ batch from #{f} failed: #{err.message}"
   console.log "ingested #{written}/#{total} extracted instance(s) from #{files.length} file(s)"

@@ -53,7 +53,19 @@ export class Index
     await @db.exec """
       CREATE TABLE IF NOT EXISTS meta (k text PRIMARY KEY, v text);
     """
+    # Bring older pgdata dirs up to the current index set (no-op when present).
+    # entities_cls_id_idx is required for streaming `brain ls` keyset scans on
+    # multi-million-row graphs — without it each page is a full sort.
+    if await @isIndexed()
+      await @ensureIndexes()
     @db
+
+  # Idempotent schema migrations for the live index (CREATE INDEX IF NOT EXISTS).
+  # Called from open() for existing brains and mirrored in rebuild() for new ones.
+  ensureIndexes: ->
+    await @db.exec """
+      CREATE INDEX IF NOT EXISTS entities_cls_id_idx ON entities (cls, id);
+    """
 
   meta: (k) ->
     r = await @db.query 'SELECT v FROM meta WHERE k = $1', [k]
@@ -149,6 +161,7 @@ export class Index
     # indexes AFTER bulk load
     await @db.exec """
       CREATE INDEX entities_cls_idx ON entities (cls);
+      CREATE INDEX entities_cls_id_idx ON entities (cls, id);
       CREATE INDEX entities_lower_idx ON entities (lower(slug));
       CREATE INDEX links_from_idx ON links (from_slug);
       CREATE INDEX links_to_idx ON links (to_slug);
@@ -335,26 +348,122 @@ export class Index
     out
 
   listInstances: (cls = null) ->
-    if cls
-      r = await @db.query 'SELECT cls, id FROM entities WHERE lower(cls) = lower($1) ORDER BY cls, id', [cls]
-    else
-      r = await @db.query 'SELECT cls, id FROM entities ORDER BY cls, id'
-    r.rows
+    rows = []
+    await @listInstancesEach cls, (row) -> rows.push(row)
+    rows
+
+  # Keyset-paginated walk over entities (cls, id). Invokes onRow once per
+  # entity and never materializes the full result set — required for multi-
+  # million-node graphs (brain ls streams these to the client).
+  # Returns the number of rows visited.
+  listInstancesEach: (cls = null, onRow, opts = {}) ->
+    batchSize = opts.batchSize or 2000
+    lastCls = null
+    lastId = null
+    total = 0
+    loop
+      if cls
+        if lastId?
+          r = await @db.query """
+            SELECT cls, id FROM entities
+            WHERE lower(cls) = lower($1) AND id > $2
+            ORDER BY id
+            LIMIT $3
+          """, [cls, lastId, batchSize]
+        else
+          r = await @db.query """
+            SELECT cls, id FROM entities
+            WHERE lower(cls) = lower($1)
+            ORDER BY id
+            LIMIT $2
+          """, [cls, batchSize]
+      else
+        if lastCls?
+          r = await @db.query """
+            SELECT cls, id FROM entities
+            WHERE (cls, id) > ($1::text, $2::text)
+            ORDER BY cls, id
+            LIMIT $3
+          """, [lastCls, lastId, batchSize]
+        else
+          r = await @db.query """
+            SELECT cls, id FROM entities
+            ORDER BY cls, id
+            LIMIT $1
+          """, [batchSize]
+      rows = r.rows
+      break if rows.length is 0
+      for row in rows
+        total++
+        await onRow(row)
+      last = rows[rows.length - 1]
+      lastCls = last.cls
+      lastId = last.id
+      break if rows.length < batchSize
+    total
 
   # Entities with zero relations, in or out (the `validate` orphan lint, on demand).
   orphans: ->
-    r = await @db.query """
-      SELECT e.slug, e.cls FROM entities e
-      WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = e.slug)
-        AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = e.slug)
-      ORDER BY e.slug
+    rows = []
+    await @orphansEach (row) -> rows.push({ slug: "#{row.cls}/#{row.id}", cls: row.cls })
+    rows
+
+  # Keyset-paginated orphan walk (cls, id) — stream-friendly for large graphs.
+  # Same connectivity predicate as orphans(); ordered by cls, id like `brain ls`.
+  orphansEach: (onRow, opts = {}) ->
+    batchSize = opts.batchSize or 2000
+    lastCls = null
+    lastId = null
+    total = 0
+    orphanPred = """
+      NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = e.slug)
+      AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = e.slug)
     """
-    r.rows
+    loop
+      if lastCls?
+        r = await @db.query """
+          SELECT e.cls, e.id FROM entities e
+          WHERE #{orphanPred}
+            AND (e.cls, e.id) > ($1::text, $2::text)
+          ORDER BY e.cls, e.id
+          LIMIT $3
+        """, [lastCls, lastId, batchSize]
+      else
+        r = await @db.query """
+          SELECT e.cls, e.id FROM entities e
+          WHERE #{orphanPred}
+          ORDER BY e.cls, e.id
+          LIMIT $1
+        """, [batchSize]
+      rows = r.rows
+      break if rows.length is 0
+      for row in rows
+        total++
+        await onRow(row)
+      last = rows[rows.length - 1]
+      lastCls = last.cls
+      lastId = last.id
+      break if rows.length < batchSize
+    total
 
   counts: ->
     e = await @db.query 'SELECT count(*)::int AS n FROM entities'
     l = await @db.query 'SELECT count(*)::int AS n FROM links'
     { entities: e.rows[0].n, links: l.rows[0].n }
+
+  # Per-class instance counts (for `schema graph` labels) — pure SQL, no .md.
+  classCounts: ->
+    r = await @db.query 'SELECT cls, count(*)::int AS n FROM entities GROUP BY cls ORDER BY cls'
+    out = {}
+    out[row.cls] = row.n for row in r.rows
+    out
+
+  # Slug presence set for ref validation (values are `true`, not full entities).
+  slugSet: ->
+    r = await @db.query 'SELECT slug FROM entities'
+    out = {}
+    out[row.slug] = true for row in r.rows
+    out
 
   # Cached size counters: live COUNT(*) over millions of rows costs hundreds of
   # ms, so `status` reads these instead. Refresh is deliberately USER-controlled
