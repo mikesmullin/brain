@@ -50,13 +50,14 @@ export async function boot() {
   geo.setAttribute('psize', new THREE.BufferAttribute(psize, 1))
   geo.computeBoundingSphere()
   const uni = { uZMix: { value: 1 }, uScale: { value: 1 } }
-  // Additive glow restored (screen-space picking below guarantees that
-  // whatever you SEE under the cursor is what a click selects — clickability
-  // no longer depends on depth occlusion). Falloff kept tight so points read
-  // as discs with a soft rim, not wide halo rings.
+  // Solid flat discs at 50% opacity — glow removed (normal alpha blending, no
+  // additive halo). The transparency is deliberate: overlapping nodes show
+  // through each other, so dense clusters read as depth/stacking instead of
+  // one opaque blob. Edge is antialiased with a tight smoothstep; interior
+  // alpha is constant.
   const mat = new THREE.ShaderMaterial({
     uniforms: uni,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    transparent: true, depthWrite: false,
     vertexShader: [
       'attribute float psize; attribute vec3 color; varying vec3 vColor;',
       'uniform float uZMix; uniform float uScale;',
@@ -74,7 +75,7 @@ export async function boot() {
       '  vec2 d = gl_PointCoord - 0.5;',
       '  float r2 = dot(d, d);',
       '  if (r2 > 0.25) discard;',
-      '  float a = smoothstep(0.25, 0.16, r2) * 0.9;',
+      '  float a = smoothstep(0.25, 0.21, r2) * 0.5;',
       '  gl_FragColor = vec4(vColor, a);',
       '}',
     ].join('\n'),
@@ -137,8 +138,7 @@ export async function boot() {
     const hf = Math.atan(Math.tan(vf) * camera.aspect)
     return radius / (0.8 * Math.tan(Math.min(vf, hf)))
   }
-  function frameSelection() {
-    const idxs = st.highlightIdx.length ? st.highlightIdx : st.selectedIdx
+  function frameIdxs(idxs) {
     if (!idxs.length) return
     const c = new THREE.Vector3()
     for (const i of idxs) c.add(nodeXYZ(i))
@@ -147,6 +147,7 @@ export async function boot() {
     for (const i of idxs) r = Math.max(r, nodeXYZ(i).distanceTo(c))
     flyTo(c, fitDist(r * 1.15))
   }
+  function frameSelection() { frameIdxs(st.highlightIdx.length ? st.highlightIdx : st.selectedIdx) }
   function frameUniverse() { flyTo(new THREE.Vector3(0, 0, 0), fitDist(meta.world_radius)) }
 
   // ---------- input (all listeners on an AbortController for clean HMR) ----------
@@ -155,10 +156,12 @@ export async function boot() {
   const keys = new Set()
   let mmb = false, moved = false
   addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return
     if (e.code === 'Space') e.preventDefault()   // Space = pan modifier only
     keys.add(e.code)
     if (e.code === 'KeyF' || e.code === 'NumpadDecimal') frameSelection()
+    // Home = same as the ⌂ "back to universe" button (zoom all the way out)
+    if (e.code === 'Home') { e.preventDefault(); frameUniverse() }
     if (e.code === 'Numpad7') { rig.pitch = -1.55 }
     if (e.code === 'Numpad1') { rig.pitch = 0; rig.yaw = 0 }
     if (e.code === 'Numpad3') { rig.pitch = 0; rig.yaw = Math.PI / 2 }
@@ -222,31 +225,56 @@ export async function boot() {
         best = i; bestD2 = Math.min(d2, bestD2); bestW = w
       }
     }
-    if (best >= 0) selectNode(best, additive)
+    if (best >= 0) clickNode(best, additive)
+    // empty-space click = select none (routes to / so back restores the
+    // selection); Ctrl+click misses are forgiven mid-multi-select
+    else if (!additive) store.openEntities([])
   }
   function syncSelection() {
     setOverlay(selection, st.selectedIdx)
     store.selectedSlugs = st.selectedIdx.map((i) => st.slugCache[i]).filter(Boolean)
   }
-  async function selectNode(i, additive = false) {
-    if (additive) {
-      const at = st.selectedIdx.indexOf(i)
-      if (at >= 0) st.selectedIdx.splice(at, 1)
-      else st.selectedIdx.push(i)
-    } else {
-      st.selectedIdx = [i]
+  // Selection is URL-first: a node click resolves its slug then routes through
+  // store.openEntities (ui.js) → Router pushState → applyEntitySelection below.
+  // Back/forward, permalinks, entity links, and direct clicks all converge on
+  // the same apply path, so every route change gets the same zoom transition.
+  async function clickNode(i, additive) {
+    let slug = st.slugCache[i]
+    if (!slug) {
+      const d = await (await fetch('/node?i=' + i)).json()
+      slug = st.slugCache[i] = d.slug
     }
-    const d = await (await fetch('/node?i=' + i)).json()
-    st.slugCache[i] = d.slug
+    // noZoom: the node is already under the cursor — select in place
+    store.openEntities(slug, additive, { noZoom: true })
+  }
+  async function resolveSlug(slug) {
+    for (const [i, s] of Object.entries(st.slugCache)) if (s === slug) return +i
+    const r = await (await fetch('/resolve?slug=' + encodeURIComponent(slug))).json()
+    if (r.i >= 0) st.slugCache[r.i] = slug
+    return r.i
+  }
+  async function applyEntitySelection(slugs) {
+    const zoom = !store.skipZoomOnce   // one-shot flag from canvas clicks
+    store.skipZoomOnce = false
+    const cur = st.selectedIdx.map((i) => st.slugCache[i])
+    if (slugs.length === cur.length && slugs.every((s, j) => s === cur[j])) return
+    const idxs = (await Promise.all(slugs.map(resolveSlug))).filter((i) => i >= 0)
+    st.selectedIdx = idxs
     syncSelection()
-    if (st.selectedIdx.includes(i)) store.showDetail(d)
+    // zero entities selected (empty-space click, ctrl-toggle-off, route to /):
+    // clear the detail pane and auto-collapse the sidebar (animates via the
+    // .collapsed transform transition)
+    if (!idxs.length) { store.detailSlug = ''; store.collapsed = true; return }
+    if (zoom) frameIdxs(idxs)
+    const d = await (await fetch('/node?i=' + idxs[idxs.length - 1])).json()
+    store.showDetail(d)
   }
   syncSelection()   // restore overlay + selectedSlugs after HMR
 
   // ---------- actions for the HUD (ui.js) ----------
   store.api = {
     flyToNode: (i) => flyTo(nodeXYZ(i)),
-    selectNode: (i) => selectNode(i, false),
+    applyEntitySelection,
     setHighlights: (idxs) => setOverlay(highlights, idxs),
     setPath: (idxs) => {
       const a = new Float32Array(idxs.length * 3)
@@ -260,6 +288,9 @@ export async function boot() {
       store.is3d = st.zMixTarget === 1
     },
   }
+  // Permalink deep link (/e/slug,…): the route was parsed by ui.js before this
+  // scene existed — apply it now. No-op on HMR (selection already matches).
+  if (store.routeSlugs?.length) applyEntitySelection(store.routeSlugs)
 
   // ---------- FPS histogram (gl1-style) ----------
   const fpsCtx = document.getElementById('fps').getContext('2d')

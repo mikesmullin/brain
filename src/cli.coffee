@@ -2,7 +2,7 @@
 import { readFile } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { exists, brainRoot } from './config.coffee'
+import { exists, brainRoot, ensureBrainRegistered } from './config.coffee'
 
 HELP = """
 🧠 Brain — knowledge-graph
@@ -570,6 +570,12 @@ export main = (argv) ->
     console.error 'fatal: brain database not found.'
     console.error 'select a database with `brain use`, or invoke this command from a valid brain database directory.'
     return 1
+
+  # One place for CLI / server / viz / mcp: if the resolved db/ isn't already
+  # in ~/.config/brain/brains.yaml, add it so `brain use` lists it next time.
+  # `use` manages that file itself; `init` registers after scaffolding.
+  if cmd not in ['init', 'use'] and exists()
+    ensureBrainRegistered()
 
   try
     mod = await import(modPath)

@@ -4,6 +4,7 @@
 import Agent from 'agl-ai'
 import { hybridSearch } from './search.coffee'
 import { renderEntityText } from './index.coffee'
+import { serializeEntity } from './storage.coffee'
 
 SYSTEM = """
 You synthesize an answer about a knowledge graph using ONLY the retrieved context.
@@ -20,16 +21,50 @@ Rules:
 export thinkPrefix = (model, thinking) ->
   if thinking and String(model or '').startsWith('lm-studio:') then '<|think|>\n' else ''
 
-# Selection context (viz "include selection" toggle): tells the model which
-# entities the user currently has selected, so questions like "how are these
-# related?" resolve against the selection.
-export selectionContext = (selection) ->
-  if selection?.length then "\nthe user has selected: #{selection.join(', ')}" else ''
+# Selection block for system prompts (think / ontology).
+#
+# Only when the viz "include selection" toggle is ON does the client pass
+# `selection` (possibly an empty array). Toggle OFF → `selection` is undefined
+# and we emit nothing (no deictic blurb, no count, no entities).
+#
+#   undefined / null  → toggle off: omit entirely
+#   [] / [slugs...]   → toggle on: deictic guidance + count + optional YAML bodies
+export selectionContext = (core, selection) ->
+  return '' unless selection?
+
+  slugs = if Array.isArray(selection) then selection.filter(Boolean) else []
+  # Resolve entities first so the count matches what we actually emit
+  # (missing slugs are skipped rather than hallucinated as empty shells).
+  entities = []
+  for slug in slugs
+    e = await core.idx.fullEntity(slug)
+    entities.push(e) if e
+  n = entities.length
+  countLine = "NOTICE: In the app, I have selected #{n} #{if n is 1 then 'entity' else 'entities'}."
+
+  return "\n\n#{countLine}\n" unless n
+
+  blocks = for e in entities
+    yaml = serializeEntity(e).trimEnd()
+    """
+<entity slug="#{e.slug}">
+#{yaml}
+</entity>
+"""
+  """
+
+#{countLine}
+
+<selected-entities>
+#{blocks.join('\n')}
+</selected-entities>
+"""
 
 export think = (core, question, opts = {}) ->
   limit = opts.limit or 8
   model = opts.model or core.cfg.think.model
   results = await hybridSearch(core, question, { limit })
+  throw new Error('cancelled by user') if opts.isCancelled?()
 
   blocks = for r in results
     e = await core.idx.fullEntity(r.slug)
@@ -37,9 +72,19 @@ export think = (core, question, opts = {}) ->
     "<entity slug=\"#{r.slug}\">\n#{renderEntityText(e)}\n</entity>"
   context = blocks.filter((b) -> b).join('\n')
 
+  selCtx = await selectionContext(core, opts.selection)
+  throw new Error('cancelled by user') if opts.isCancelled?()
   agent = await Agent.factory
     model: model
-    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + selectionContext(opts.selection)
+    # stream: cancellation only works promptly over SSE — LM Studio ignores a
+    # dead client on non-streaming requests and decodes to completion (zombie
+    # slots eating the GPU); with streaming, abort closes the socket and the
+    # slot is freed within a token. Response shape is identical either way.
+    stream: true
+    # 0 retries: a cancelled/stuck inference must not re-fire (default AGL is 5).
+    # Honored centrally by withProviderRetry for every provider.
+    retries: 0
+    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + selCtx
     output_tool:
       name: 'answer'
       description: 'Report the synthesized, grounded answer with citations and gaps.'
@@ -49,7 +94,14 @@ export think = (core, question, opts = {}) ->
         gaps: { type: 'array', items: { type: 'string' } }
         reasoning: { type: 'string' }
       required: ['answer']
-  r = await agent.run prompt: "<question>#{question}</question>\n<retrieved-context>\n#{context}\n</retrieved-context>"
+  opts.onAgent?(agent)   # cancellation hook: lets the server abort this inference
+  # Re-check after construction: cancel may have landed during factory/init
+  if opts.isCancelled?()
+    agent.abort('cancelled by user')
+    throw new Error('cancelled by user')
+  # Plain user text (no <question> wrapper) + retrieved context block.
+  r = await agent.run prompt: "#{question}\n\n<retrieved-context>\n#{context}\n</retrieved-context>"
+  throw new Error('cancelled by user') if opts.isCancelled?()
   {
     answer: r.answer
     citations: r.citations or []

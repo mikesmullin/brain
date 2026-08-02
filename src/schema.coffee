@@ -57,15 +57,24 @@ export classFields = (schema, cls) ->
       out["#{alias}.#{field}"] = { comp: compName, alias, field, def: fdef }
   out
 
-# A compact mermaid+yaml view of the schema graph (for `schema graph`).
+# A compact mermaid+yaml view of the schema graph (for `schema graph` / ontology).
 # When `counts` (class -> instance count) is given, names render as "Name (n)".
+#
+# Relations may omit domain/range (wildcard — common in bulk ETLs). Never render
+# the JS string "undefined"; fall back to the known class stubs joined by `|`
+# so the LLM still sees real class names (e.g. Entity|Officer|… -->|REL| …).
 export schemaGraph = (schema, counts = null) ->
+  classNames = Object.keys(schema.classes or {})
+  classStub = classNames.join('|') or '*'
+  endpoint = (v) ->
+    s = if v? then String(v).trim() else ''
+    if s and s isnt 'undefined' then s else classStub
   edges = []
   for own rel, def of (schema.relations or {})
-    edges.push("#{def.domain} -->|#{rel}| #{def.range}")
+    edges.push("#{endpoint(def.domain)} -->|#{rel}| #{endpoint(def.range)}")
   label = (name) -> if counts then "#{name} (#{counts[name] or 0})" else name
   {
     graph: edges.join('\n')
     top: (label(n) for n in topClasses(schema))
-    types: (label(n) for n in Object.keys(schema.classes or {}))
+    types: (label(n) for n in classNames)
   }

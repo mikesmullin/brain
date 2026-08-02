@@ -4,38 +4,209 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
 #world { position: fixed; inset: 0; display: block; }
 .panel { background: rgba(16,17,22,.82); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.09); border-radius: 14px; color: #e8e8ec; }
 /* top-center search bar (rounded floating panel) — all 5 query surfaces */
-#searchbar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-radius: 999px; z-index: 10; max-width: min(760px, calc(100vw - 320px)); }
-#searchbar select, #searchbar input, #searchbar button { background: rgba(255,255,255,.06); color: #e8e8ec; border: 1px solid rgba(255,255,255,.08); border-radius: 999px; padding: 7px 12px; font-size: 13px; outline: none; }
-#searchbar input { width: 300px; }
-#searchbar input:focus { border-color: rgba(120,160,255,.5); }
+#searchbar {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+  border-radius: 999px; z-index: 10; max-width: min(760px, calc(100vw - 320px));
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+/* whole-bar focus: soft blue outline + glow when any child (esp. the text
+   field) is focused — cooler than a ring on the input alone */
+#searchbar:focus-within {
+  border-color: rgba(143, 179, 255, .55);
+  box-shadow: 0 0 0 1px rgba(122, 162, 255, .28), 0 0 20px rgba(122, 162, 255, .38);
+}
+#searchbar select, #searchbar input, #searchbar button {
+  background: rgba(255,255,255,.06); color: #e8e8ec;
+  border: 1px solid rgba(255,255,255,.08); border-radius: 999px;
+  padding: 7px 12px; font-size: 13px; outline: none;
+  transition: background .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease;
+}
+/* the input flexes; every other control keeps its size — so the bar's
+   contents always fit INSIDE the pill instead of overflowing its right edge */
+#searchbar select, #searchbar button { flex: none; }
+#searchbar input { width: 100%; min-width: 0; }
+/* input itself stays quiet on focus — the bar's :focus-within does the work */
+#searchbar input:focus { border-color: rgba(255,255,255,.08); box-shadow: none; }
 #searchbar button { cursor: pointer; }
 #searchbar button:hover { background: rgba(255,255,255,.12); }
+#searchbar button:active { background: rgba(255,255,255,.16); }
+#searchbar button:focus-visible {
+  border-color: rgba(143, 179, 255, .65);
+  box-shadow: 0 0 0 2px rgba(122, 162, 255, .35);
+}
+/* submit button (⏎); while a query runs the red stop button takes its slot */
+#go { display: inline-flex; align-items: center; justify-content: center; }
+/* pure CSS ring spinner (shared) — a font glyph's ink is not optically
+   centered in its em box, so it always orbits slightly; a border ring's
+   center IS the box center IS the rotation origin, exact by construction */
+.spin { display: inline-block; width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
 /* query input wrapper: floating clear (x) inside the field, right edge */
-.qwrap { position: relative; display: inline-flex; align-items: center; }
+.qwrap { position: relative; display: inline-flex; align-items: center; flex: 1 1 auto; min-width: 140px; }
 .qwrap input { padding-right: 30px; }
 .qclear { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #8d8d95; font-size: 14px; }
 .qclear:hover { color: #fff; }
 /* search-mode option chips (strategy + expand), right of the dropdown */
 #searchopts { display: flex; gap: 4px; align-items: center; }
-.chip { padding: 5px 10px; border-radius: 999px; font-size: 11px; cursor: pointer; color: #9a9aa5; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07); user-select: none; }
+.chip { padding: 5px 10px; border-radius: 999px; font-size: 11px; cursor: pointer; color: #9a9aa5; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07); user-select: none; transition: background .12s ease, border-color .12s ease, color .12s ease; }
+.chip:hover { background: rgba(255,255,255,.08); color: #cfd0d6; }
+.chip:active { background: rgba(255,255,255,.12); }
 .chip.on { color: #cfe1ff; background: rgba(120,160,255,.16); border-color: rgba(120,160,255,.4); }
+.chip.on:hover { background: rgba(120,160,255,.22); }
 /* LLM options (think/ontology modes): model picker + thinking toggle */
 #llmopts { display: flex; gap: 4px; align-items: center; }
 #llmopts select { max-width: 220px; }
-#think-toggle, #sel-toggle, #voice-toggle { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border-radius: 50%; font-size: 17px; color: #9a9aa5; }
-#think-toggle.on { color: #b48eff; background: rgba(180,142,255,.14); border-color: rgba(180,142,255,.5); }
-#sel-toggle.on { color: #9ecbff; background: rgba(158,203,255,.14); border-color: rgba(158,203,255,.5); }
-#voice-toggle.on { color: #7ee2a8; background: rgba(126,226,168,.14); border-color: rgba(126,226,168,.5); }
+
+/* ---------- icon-button system (searchbar + sidebar) ----------
+   Same state grammar as the green voice toggle:
+     default  — quiet fill + solid border + muted icon (like #go)
+     hover    — brighter fill
+     active   — mouse-down press
+     .on      — themed pressed/toggled (fg + bg + border all match)
+     focus-visible — keyboard/tab ring
+   Off state is forced with :not(.on) so purple never leaks after toggle-off
+   (mouse :focus can otherwise keep a themed ring looking “stuck on”). */
+#searchbar #think-toggle,
+#searchbar #sel-toggle,
+#searchbar #stop,
+#sidebar #voice-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border-radius: 50%; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, opacity .12s ease;
+}
+#searchbar #think-toggle,
+#searchbar #sel-toggle { width: 32px; height: 32px; font-size: 17px; }
+#searchbar #stop { width: auto; min-width: 32px; height: 32px; padding: 0 10px; border-radius: 999px; font-size: 15px; }
+#sidebar #voice-toggle { width: 26px; height: 26px; font-size: 15px; }
+
+/* OFF / default — match submit (#go): dark gray fill, quiet border, muted icon */
+#searchbar #think-toggle:not(.on),
+#searchbar #sel-toggle:not(.on),
+#sidebar #voice-toggle:not(.on) {
+  color: #9a9aa5;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: none;
+}
+#searchbar #think-toggle:not(.on):hover,
+#searchbar #sel-toggle:not(.on):hover,
+#sidebar #voice-toggle:not(.on):hover {
+  color: #cfd0d6;
+  background: rgba(255, 255, 255, .12);
+  border-color: rgba(255, 255, 255, .18);
+}
+#searchbar #think-toggle:not(.on):active,
+#searchbar #sel-toggle:not(.on):active,
+#sidebar #voice-toggle:not(.on):active {
+  background: rgba(255, 255, 255, .16);
+}
+/* neutral tab ring when off (not purple) */
+#searchbar #think-toggle:not(.on):focus-visible,
+#searchbar #sel-toggle:not(.on):focus-visible,
+#sidebar #voice-toggle:not(.on):focus-visible {
+  border-color: rgba(143, 179, 255, .65);
+  box-shadow: 0 0 0 2px rgba(122, 162, 255, .35);
+}
+
+/* ON / pressed — purple (brain + selection) */
+#searchbar #think-toggle.on,
+#searchbar #sel-toggle.on {
+  color: #f4eeff;
+  background: rgba(147, 102, 255, .42);
+  border: 1px solid rgba(187, 152, 255, .95);
+  box-shadow: none;
+}
+#searchbar #think-toggle.on:hover,
+#searchbar #sel-toggle.on:hover {
+  color: #fff;
+  background: rgba(147, 102, 255, .55);
+  border-color: #d4c0ff;
+}
+#searchbar #think-toggle.on:active,
+#searchbar #sel-toggle.on:active {
+  background: rgba(147, 102, 255, .62);
+  border-color: #e4d6ff;
+}
+#searchbar #think-toggle.on:focus-visible,
+#searchbar #sel-toggle.on:focus-visible {
+  border-color: #d4c0ff;
+  box-shadow: 0 0 0 2px rgba(147, 102, 255, .4);
+}
+
+/* red theme — stop button (always "on"/armed while visible) */
+#searchbar #stop {
+  color: #ff8a8a;
+  background: rgba(255, 80, 80, .18);
+  border-color: rgba(255, 107, 107, .65);
+}
+#searchbar #stop:hover {
+  color: #ffc0c0;
+  background: rgba(255, 80, 80, .28);
+  border-color: rgba(255, 140, 140, .9);
+}
+#searchbar #stop:active {
+  color: #fff;
+  background: rgba(255, 80, 80, .38);
+  border-color: #ffb0b0;
+}
+#searchbar #stop:focus-visible {
+  border-color: #ff8a8a;
+  box-shadow: 0 0 0 2px rgba(255, 80, 80, .4);
+}
+/* after cancel click: pulse until backend confirms abort */
+#searchbar #stop.stopping {
+  cursor: wait;
+  animation: pulse 1s ease-in-out infinite;
+  background: rgba(255, 80, 80, .32);
+  border-color: #ff6b6b;
+  color: #fff;
+}
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* green theme — voice toggle when .on */
+#sidebar #voice-toggle.on {
+  color: #7ee2a8;
+  background: rgba(126, 226, 168, .14);
+  border-color: rgba(126, 226, 168, .55);
+}
+#sidebar #voice-toggle.on:hover {
+  color: #a8f0c4;
+  background: rgba(126, 226, 168, .22);
+  border-color: rgba(126, 226, 168, .75);
+}
+#sidebar #voice-toggle.on:active {
+  background: rgba(126, 226, 168, .28);
+}
+#sidebar #voice-toggle:focus-visible {
+  border-color: rgba(126, 226, 168, .7);
+  box-shadow: 0 0 0 2px rgba(126, 226, 168, .35);
+}
+.hdr-right { display: inline-flex; align-items: center; gap: 8px; }
 /* FPS histogram — reserved top-right corner */
 #fps { position: fixed; top: 8px; right: 8px; width: 120px; height: 24px; z-index: 20; pointer-events: none; }
 #status { position: fixed; top: 44px; right: 8px; z-index: 9; font-size: 11px; color: #8d8d95; text-align: right; pointer-events: none; }
 /* right-docked collapsible sidebar */
 #sidebar { position: fixed; top: 64px; right: 12px; bottom: 12px; width: 320px; z-index: 9; display: flex; flex-direction: column; transition: transform .25s ease; overflow: hidden; }
 #sidebar.collapsed { transform: translateX(344px); }
-#sidebar header { padding: 10px 14px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #9a9aa5; border-bottom: 1px solid rgba(255,255,255,.07); display: flex; justify-content: space-between; align-items: baseline; }
-#qms { color: #7ee2a8; font-size: 11px; text-transform: none; letter-spacing: 0; }
+#sidebar header { padding: 10px 14px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #9a9aa5; border-bottom: 1px solid rgba(255,255,255,.07); display: flex; justify-content: space-between; align-items: center; }
+/* sidebar title: in-flight spinner prefixes the "thinking…" text */
+.hdr-title { display: inline-flex; align-items: center; gap: 7px; }
+.hdr-title .spin { width: 10px; height: 10px; }
+#qms {
+  color: #7ee2a8;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+  letter-spacing: 0;
+  display: inline-block;
+  min-width: 7ch; /* e.g. 12.345s — right-aligned so growth doesn't shove the voice btn */
+  text-align: right;
+}
 #results { flex: 1; overflow-y: auto; padding: 6px; }
-.hit { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+/* result rows are anchors: entity links carry a real /e/… permalink href */
+.hit { display: block; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; color: inherit; text-decoration: none; }
 .hit:hover { background: rgba(120,160,255,.12); }
 .hit .slug { color: #9ecbff; }
 .hit .meta { color: #8d8d95; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -43,6 +214,69 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
 .answer.error { color: #ff9a9a; }
 .answer.warn { color: #f2cc8f; }
 .answer.warn a { color: #ffe17a; }
+
+/* Markdown answer body (think / ontology) — dark-theme prose for the sidebar */
+.answer.md { padding: 12px 14px 14px; }
+.answer.md > :first-child { margin-top: 0; }
+.answer.md > :last-child { margin-bottom: 0; }
+.answer.md h1, .answer.md h2, .answer.md h3, .answer.md h4 {
+  color: #e8e8ec; font-weight: 600; line-height: 1.3; margin: 1em 0 .45em;
+}
+.answer.md h1 { font-size: 1.2em; border-bottom: 1px solid rgba(255,255,255,.08); padding-bottom: .25em; }
+.answer.md h2 { font-size: 1.1em; }
+.answer.md h3 { font-size: 1.02em; color: #cfd0d6; }
+.answer.md h4 { font-size: .95em; color: #b0b0b8; }
+.answer.md p { margin: .55em 0; }
+.answer.md a { color: #9ecbff; text-decoration: none; }
+.answer.md a:hover { text-decoration: underline; color: #c5e0ff; }
+.answer.md a.md-entity, .answer.md a.md-entity code {
+  color: #9ecbff; background: rgba(120,160,255,.12);
+  border-radius: 4px; padding: 0 4px; text-decoration: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .92em;
+}
+.answer.md a.md-entity:hover { background: rgba(120,160,255,.22); text-decoration: none; }
+.answer.md strong { color: #fff; font-weight: 600; }
+.answer.md em { color: #d0d0d8; }
+.answer.md ul, .answer.md ol { margin: .45em 0 .55em; padding-left: 1.35em; }
+.answer.md li { margin: .2em 0; }
+.answer.md li > ul, .answer.md li > ol { margin: .15em 0; }
+.answer.md blockquote {
+  margin: .65em 0; padding: .35em .85em;
+  border-left: 3px solid rgba(147, 102, 255, .55);
+  background: rgba(147, 102, 255, .08);
+  color: #c8c8d0; border-radius: 0 6px 6px 0;
+}
+.answer.md blockquote p { margin: .3em 0; }
+.answer.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em; background: rgba(255,255,255,.07);
+  border: 1px solid rgba(255,255,255,.06); border-radius: 4px;
+  padding: .1em .35em; color: #e2e2ea;
+}
+.answer.md pre {
+  margin: .65em 0; padding: 10px 12px; overflow-x: auto;
+  background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px; font-size: 11.5px; line-height: 1.45;
+}
+.answer.md pre code {
+  background: none; border: none; padding: 0; font-size: inherit; color: #d4d4dc;
+}
+.answer.md hr {
+  border: none; border-top: 1px solid rgba(255,255,255,.1); margin: .9em 0;
+}
+.answer.md table {
+  width: 100%; border-collapse: collapse; margin: .65em 0; font-size: 12px;
+}
+.answer.md th, .answer.md td {
+  border: 1px solid rgba(255,255,255,.1); padding: 5px 8px; text-align: left;
+}
+.answer.md th {
+  background: rgba(255,255,255,.05); color: #cfd0d6; font-weight: 600;
+}
+.answer.md tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+.answer.md img { max-width: 100%; border-radius: 6px; }
+
 #results pre { white-space: pre-wrap; word-break: break-word; color: #cfd0d6; margin: 6px; font-size: 11px; }
 #detail { max-height: 45%; overflow-y: auto; border-top: 1px solid rgba(255,255,255,.07); padding: 10px 12px; font-size: 12px; }
 #detail b { color: #9ecbff; }

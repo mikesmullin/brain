@@ -1,5 +1,5 @@
 # init.coffee — scaffold the cwd-local .brain/ layout.
-import { paths, ensureLayout } from '../config.coffee'
+import { paths, ensureLayout, ensureBrainRegistered } from '../config.coffee'
 import { schemaPath } from '../schema.coffee'
 import { existsSync } from 'fs'
 import { writeFile } from 'fs/promises'
@@ -22,6 +22,8 @@ export run = (argv, cwd = process.cwd()) ->
   sp = schemaPath(p.storage)
   unless existsSync(sp)
     await writeFile(sp, yaml.dump(STARTER_SCHEMA, { sortKeys: false }), 'utf-8')
+  # New db/ should appear in `brain use` immediately (same helper CLI/server/viz use).
+  ensureBrainRegistered(cwd)
   console.log "initialized brain at #{p.root}"
   console.log "  config:  #{p.config}"
   console.log "  storage: #{p.storage}"
