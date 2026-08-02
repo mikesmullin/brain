@@ -5,7 +5,7 @@
      re-imported with cache-busting by window.__M_BOOT__ on m.js HMR pushes
      (see /__m_hmr in the viz server), so edits to /ui.js, /scene.js,
      /styles.css, or /app.js hot-reload without losing camera or store state.
-     #world and #fps live OUTSIDE #app so M re-renders never touch them. -->
+     #world, #fps, #mjs-draws live OUTSIDE #app so M re-renders never touch them. -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -25,7 +25,9 @@
 </head>
 <body>
 <canvas id="world"></canvas>
-<canvas id="fps" width="120" height="24"></canvas>
+<!-- m.js rAF flushes/frame (left) · three.js FPS (right) -->
+<canvas id="mjs-draws" width="120" height="24" title="m.js flushes per display frame (rAF paint slots, expect ≤1)"></canvas>
+<canvas id="fps" width="120" height="24" title="three.js render FPS"></canvas>
 <div id="app"></div>
 <script type="module">
   import '/vendor/m-js/src/hot-client.js'

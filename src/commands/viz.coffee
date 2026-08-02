@@ -14,13 +14,14 @@ import { join, dirname, extname, normalize } from 'path'
 import { fileURLToPath } from 'url'
 import yaml from 'js-yaml'
 import Agent from 'agl-ai'
-import { paths, loadConfig } from '../config.coffee'
+import { paths, loadConfig, projectRootFromDb, storageDirs } from '../config.coffee'
 import { parseArgs } from '../args.coffee'
 import { serverRunning } from '../server.coffee'
 import { request, noServerError } from '../client.coffee'
 import { createChatApi } from '../viz-chat.mjs'
 import { serializeEntity } from '../storage.coffee'
 import { parseSlug } from '../slug.coffee'
+import { loadSchema, entityDisplayName, displayFieldMap } from '../schema.coffee'
 
 MIME =
   '.html': 'text/html; charset=utf-8'
@@ -100,20 +101,10 @@ export run = (argv, cwd = process.cwd()) ->
       idx = slugIndex.get(r.slug)
       Object.assign({}, r, { i: (idx ? -1) })
 
-  # Deterministic display name for entity links (prefer info.name / meta.name /
-  # any component `.name` / `.title`; fall back to the slug).
-  entityDisplayName = (entity, slug) ->
-    comps = entity?.components or {}
-    for key in ['info', 'meta', 'profile', 'identity']
-      n = comps[key]?.name
-      return String(n).trim() if n? and String(n).trim()
-      t = comps[key]?.title
-      return String(t).trim() if t? and String(t).trim()
-    for own _alias, fields of comps when fields and typeof fields is 'object'
-      for fname in ['name', 'title', 'label', 'display_name', 'full_name']
-        v = fields[fname]
-        return String(v).trim() if v? and typeof v isnt 'object' and String(v).trim()
-    slug or entity?.slug or ''
+  # Schema-driven display names (class.displayField, then name/title heuristics).
+  schema = await loadSchema(await storageDirs(cwd))
+  classDisplayFields = displayFieldMap(schema)
+  displayName = (entity, slug) -> entityDisplayName(schema, entity, slug)
 
   # YAML (or JSON fallback) body for <entity> blocks in LLM context.
   formatEntityYaml = (out) ->
@@ -136,11 +127,25 @@ export run = (argv, cwd = process.cwd()) ->
   json = (obj) -> new Response(JSON.stringify(obj), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
 
   # angela multi-session chat (cowork-compatible /api/* surface).
-  # Agents + session logs live under the active brain db/ so the DB admin
-  # owns .angela/ next to entities (paths(cwd).root), not the process CWD.
+  # Agents + session logs live at <project>/.angela/ — project root is the
+  # parent of db/ (sibling of brain.yaml), NOT db/.angela (that was a mistake).
+  # brainCwd = this command's cwd (same as server RPC / `brain mcp`) so the
+  # default agent's MCP child resolves the active db via paths(cwd).
   dbRoot = paths(cwd).root
-  chatApi = createChatApi({ projectRoot: dbRoot, brainCwd: cwd })
-  console.log "brain viz: angela project root #{chatApi.projectRoot} (db/.angela/agents)"
+  angelaRoot = projectRootFromDb(dbRoot)
+  # fetchEntity: after agent put_entity/method_invoke, push a full snapshot into
+  # the SPA entity-model over the chat NDJSON stream (entity_changed).
+  chatApi = createChatApi({
+    projectRoot: angelaRoot
+    brainCwd: cwd
+    fetchEntity: (slug) ->
+      try
+        out = await request(cwd, 'get_entity', { slug, include_links: true })
+        Object.assign(out or {}, { slug, i: (slugIndex.get(slug) ? -1) })
+      catch err
+        { slug, error: err.message or String(err) }
+  })
+  console.log "brain viz: angela project root #{chatApi.projectRoot} (.angela/agents)"
 
   # static files from public/ (traversal-guarded, no-store so HMR always wins)
   serveStatic = (pathname) ->
@@ -152,6 +157,41 @@ export run = (argv, cwd = process.cwd()) ->
     new Response Bun.file(abs), { headers: { 'content-type': MIME[extname(abs).toLowerCase()] or 'application/octet-stream', 'cache-control': 'no-store' } }
 
   hmrClients = new Set()
+
+  # Shared entity fetchers (HTTP fallback + entity WebSocket).
+  # Never throw out of these — missing brain server returns per-slug errors so
+  # the SPA/WS stay up (user should `brain server start` if sock is gone).
+  fetchEntitiesBySlugs = (list, include_links = true) ->
+    list = (list or []).filter(Boolean).slice(0, 64)
+    entities = []
+    unless serverRunning(cwd)
+      msg = noServerError(cwd).message
+      return ({ slug, error: msg } for slug in list)
+    for slug in list
+      try
+        out = await request(cwd, 'get_entity', { slug, include_links })
+        ent = Object.assign(out or {}, { slug, i: (slugIndex.get(slug) ? -1) })
+        # Attach schema-driven label so SPA chips use displayField (e.g. info.address)
+        ent.label = displayName(ent, slug) unless ent.error
+        entities.push(ent)
+      catch err
+        entities.push({ slug, error: err.message or String(err) })
+    entities
+
+  fetchLabelsBySlugs = (list) ->
+    list = (list or []).filter(Boolean).slice(0, 100)
+    labels = {}
+    unless serverRunning(cwd)
+      # Fall back to slug-as-label; SPA still works offline for display names
+      labels[slug] = slug for slug in list
+      return labels
+    for slug in list
+      try
+        out = await request(cwd, 'get_entity', { slug, include_links: false })
+        labels[slug] = displayName(out, slug)
+      catch
+        labels[slug] = slug
+    labels
 
   # Recursively list public/ files for HMR (chat/*.js etc.).
   listPublicFiles = (dir, base = '') ->
@@ -170,6 +210,37 @@ export run = (argv, cwd = process.cwd()) ->
       # ignore
     out
 
+  # Entity WS handler MUST live outside Bun.serve({…}).
+  # A `foo = ->` assignment indented as a serve option makes CoffeeScript split
+  # the object so `websocket:` is NOT passed to Bun.serve → upgrade throws
+  # "To enable websocket support, set the websocket object".
+  handleEntityWsMessage = (ws, raw) ->
+    try
+      text = if typeof raw is 'string' then raw else (try raw.toString() catch then '')
+      msg = JSON.parse(text or '{}')
+    catch
+      return
+    id = msg.id
+    return unless id?
+    try
+      if msg.type is 'nodes'
+        list = if Array.isArray(msg.slugs) then msg.slugs else []
+        list = list.map((s) -> String(s or '').trim()).filter(Boolean)
+        entities = await fetchEntitiesBySlugs(list, true)
+        ws.send JSON.stringify({ id, type: 'nodes_result', entities })
+      else if msg.type is 'labels'
+        list = if Array.isArray(msg.slugs) then msg.slugs else []
+        list = list.map((s) -> String(s or '').trim()).filter(Boolean)
+        labels = await fetchLabelsBySlugs(list)
+        ws.send JSON.stringify({ id, type: 'labels_result', labels })
+      else
+        ws.send JSON.stringify({ id, type: 'error', error: "unknown type: #{msg.type}" })
+    catch err
+      try
+        ws.send JSON.stringify({ id, type: 'error', error: err.message or String(err) })
+      catch
+        # socket already closed
+
   srv = Bun.serve
     port: port
     # LLM think/ontology streams can sit quiet for a long time while the model
@@ -181,7 +252,11 @@ export run = (argv, cwd = process.cwd()) ->
       url = new URL(req.url)
       # m.js HMR websocket
       if url.pathname is '/__m_hmr'
-        return undefined if server.upgrade(req)
+        return undefined if server.upgrade(req, { data: { kind: 'hmr' } })
+        return new Response('WebSocket upgrade failed', { status: 400 })
+      # SPA entity lookups (nodes / labels) — avoids HTTP GET storms
+      if url.pathname is '/__entity_ws'
+        return undefined if server.upgrade(req, { data: { kind: 'entity' } })
         return new Response('WebSocket upgrade failed', { status: 400 })
       try
         # angela chat API (sessions, stream, approve, …)
@@ -201,35 +276,22 @@ export run = (argv, cwd = process.cwd()) ->
             slug = slugs[i]
             return json({ error: 'bad index' }) unless slug
             out = await request(cwd, 'get_entity', { slug, include_links: true })
-            json(Object.assign(out, { i, slug }))
+            ent = Object.assign(out, { i, slug })
+            ent.label = displayName(ent, slug)
+            json(ent)
           when '/nodes'
-            # Multi-entity fetch for the Inspector (comma-separated slugs).
+            # HTTP fallback (SPA prefers /__entity_ws)
             raw = url.searchParams.get('slugs') or ''
             list = raw.split(',').map((s) -> decodeURIComponent(s.trim())).filter(Boolean)
-            list = list.slice(0, 64)
-            entities = []
-            for slug in list
-              try
-                out = await request(cwd, 'get_entity', { slug, include_links: true })
-                entities.push(Object.assign(out, { slug, i: (slugIndex.get(slug) ? -1) }))
-              catch err
-                entities.push({ slug, error: err.message or String(err) })
-            json({ entities })
+            json({ entities: await fetchEntitiesBySlugs(list, true) })
           when '/labels'
-            # Lightweight display-name lookup for entity links (batch).
-            # Returns { labels: { "Class/id": "Human Name", ... } } — never fails a
-            # whole request; missing entities map to the slug itself.
+            # HTTP fallback (SPA prefers /__entity_ws)
             raw = url.searchParams.get('slugs') or ''
             list = raw.split(',').map((s) -> decodeURIComponent(s.trim())).filter(Boolean)
-            list = list.slice(0, 100)
-            labels = {}
-            for slug in list
-              try
-                out = await request(cwd, 'get_entity', { slug, include_links: false })
-                labels[slug] = entityDisplayName(out, slug)
-              catch
-                labels[slug] = slug
-            json({ labels })
+            json({ labels: await fetchLabelsBySlugs(list) })
+          when '/display-fields'
+            # Class → displayField path map for SPA (schema-driven labels)
+            json({ fields: classDisplayFields })
           when '/entity-context'
             # Preload entity YAML for LLM prompts (selected or wiki-referenced).
             # GET ?slugs=a,b&tag=referenced-entities&notice=optional+line
@@ -371,10 +433,18 @@ export run = (argv, cwd = process.cwd()) ->
         json({ error: err.message })
     websocket:
       open: (ws) ->
-        hmrClients.add(ws)
-        ws.send JSON.stringify({ type: 'connected', version: 'brain-viz' })
-      close: (ws) -> hmrClients.delete(ws)
-      message: ->
+        kind = ws.data?.kind or 'hmr'
+        if kind is 'hmr'
+          hmrClients.add(ws)
+          ws.send JSON.stringify({ type: 'connected', version: 'brain-viz' })
+        else if kind is 'entity'
+          ws.send JSON.stringify({ type: 'ready', channel: 'entity' })
+      close: (ws) ->
+        hmrClients.delete(ws)
+      message: (ws, raw) ->
+        return unless ws.data?.kind is 'entity'
+        # do not await — keep the WS event loop free
+        handleEntityWsMessage(ws, raw)
 
   # HMR watcher: recursive public/ (except vendor/) via 300ms mtime poll.
   # fs.watch proved unreliable here; stat'ing a handful of files is free.
@@ -397,6 +467,6 @@ export run = (argv, cwd = process.cwd()) ->
   console.log "brain viz: serving http://127.0.0.1:#{port}   (Ctrl-C to stop)"
   console.log "  nodes: #{meta.nodes} · components: #{meta.components} (#{meta.isolated} isolated) · color: component · size: log-degree"
   console.log "  HMR: watching #{publicDir} (incl. chat/*) · chat: angela multi-session"
-  console.log "  connected to brain server for hover/search lookups"
+  console.log "  entity WS: /__entity_ws (nodes/labels) · connected to brain server for lookups"
   await new Promise(->)   # serve until Ctrl-C
   0

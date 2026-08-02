@@ -10,7 +10,7 @@ import { thinkPrefix, buildPromptEntityContext } from './think.coffee'
 # Longest practical wall-clock stamp for the system prompt: full weekday, month
 # name, day, year, 12h time with seconds + ms, long timezone name, plus ISO-8601
 # for unambiguous machine parse (local timezone via Intl).
-formatSystemTime = (d = new Date()) ->
+export formatSystemTime = (d = new Date()) ->
   human = new Intl.DateTimeFormat('en-US',
     weekday: 'long'
     era: 'long'
@@ -26,16 +26,29 @@ formatSystemTime = (d = new Date()) ->
   ).format(d)
   "#{human} (#{d.toISOString()})"
 
-export ontologyQuery = (core, question, opts = {}) ->
-  model = opts.model or core.cfg.think.model
+# Authoritative browser-agent system prompt (ontology path + Angela viz chat).
+# Built lazily — call right before Agent.factory() / session.run so system_time
+# and entCtx are fresh. Do not bake this into agent coffee / setDefaultAgent.
+#
+# opts:
+#   model, thinking  — thinkPrefix for lm-studio
+#   entCtx           — preloaded <selected-entities> / <referenced-entities> YAML
+#   freeform         — true for Angela multi-turn chat (omit final_answer requirement);
+#                      false/omit for ontologyQuery (requires final_answer tool)
+# Tool inventories are not listed here — the model already sees registered tools.
+export buildOntologySystemPrompt = (opts = {}) ->
+  model = opts.model
+  thinking = opts.thinking
+  entCtx = opts.entCtx or ''
+  freeform = opts.freeform is true
+  # Only difference freeform vs ontology: whether final_answer is mandatory.
+  finalAnswerRule = if freeform then '' else """
 
-  # Selected entities (toggle-on) + wiki-link references in the question
-  # are preloaded into the system prompt so tools aren't needed for those.
-  entCtx = await buildPromptEntityContext core,
-    selection: opts.selection
-    question: question
-  system = """
-#{thinkPrefix(model, opts.thinking)}
+You must reply using the `final_answer` tool; I will not accept other replies.
+"""
+
+  """
+#{thinkPrefix(model, thinking)}
 You're a research assistant.
 You help me (a researcher) to (answer relational questions) by (traversing a typed knowledge graph).
 I (the human operator) am interacting with you via (the ontology browser app).
@@ -54,9 +67,7 @@ IMPORTANT: Always refer to an entity by its slug (this will cause the app UI to 
 
 If I refer to context you don't have, then ask me clarifying questions.
 
-Be honest. If you don't know the answer, then say so. Use markdown in your replies.
-
-You must reply using the `final_answer` tool; I will not accept other replies.
+Be honest. If you don't know the answer, then say so. Use markdown in your replies.#{finalAnswerRule}
 
 ## Metadata
 
@@ -73,6 +84,21 @@ The data is historical and does not imply wrongdoing.
 
 #{entCtx}
 """
+
+export ontologyQuery = (core, question, opts = {}) ->
+  model = opts.model or core.cfg.think.model
+
+  # Selected entities (toggle-on) + wiki-link references in the question
+  # are preloaded into the system prompt so tools aren't needed for those.
+  entCtx = await buildPromptEntityContext core,
+    selection: opts.selection
+    question: question
+  # Lazy: system prompt assembled immediately before Agent.factory
+  system = buildOntologySystemPrompt
+    model: model
+    thinking: opts.thinking
+    entCtx: entCtx
+    freeform: false
 
   agent = await Agent.factory
     model: model

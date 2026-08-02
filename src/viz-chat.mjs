@@ -1,10 +1,13 @@
 /**
  * brain viz chat API — browser multi-session chat over angela (library).
  *
- * Mounted under /api/* by `brain viz`. Project root = the active brain db/
- * directory (`paths(cwd).root` from `brain use`), so agents and session logs
- * live in `<db>/.angela/`. A default `brain` agent is installed on first run
- * if that agents dir is empty.
+ * Mounted under /api/* by `brain viz`. Project root = the brain project root
+ * (parent of db/, sibling of brain.yaml). Agents and session logs live in
+ * `<project>/.angela/` — not under db/.
+ *
+ * Brain registers an Angela setDefaultAgent() factory (name "default") so
+ * projects without .angela/agents/*.coffee still get a working agent. When any
+ * disk agent exists, "default" is omitted from the UI catalog.
  *
  * POST /api/chat          → NDJSON stream
  * POST /api/approve
@@ -17,17 +20,13 @@
  * GET  /api/sessions/:id
  * POST /api/session/new
  * POST /api/allowlist
+ * GET  /api/tools?agent=&tabId=
+ * POST /api/tools-enabled
  * GET  /api/context-window
  * POST /api/event/meta
  */
 import { resolve, dirname, join } from 'node:path';
-import {
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-  readFileSync,
-  readdirSync,
-} from 'node:fs';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   Angela,
@@ -41,12 +40,143 @@ import {
   defaultMcpRoot,
   resolveContextWindow,
   resolveContextWindowAsync,
+  normalizeToolsEnabled,
+  setDefaultAgent,
 } from 'angela';
+import { buildOntologySystemPrompt } from './ontology.coffee';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRAIN_PKG = resolve(__dirname, '..');
-const BRAIN_BIN = join(BRAIN_PKG, 'bin', 'brain.mjs');
-const DEFAULT_AGENT_SRC = join(BRAIN_PKG, 'share', 'angela', 'agents', 'brain.coffee');
+/** Package-relative CLI entry (fallback when argv[1] is not brain.mjs). */
+const BRAIN_BIN_PKG = join(BRAIN_PKG, 'bin', 'brain.mjs');
+
+/**
+ * Resolve the running `brain` CLI script path for MCP child processes.
+ * Prefer process.argv[1] (same entry that launched this process); fall back to
+ * this package's bin/brain.mjs next to the installed sources.
+ *
+ * @returns {string} absolute path to brain.mjs
+ */
+export function resolveBrainBin() {
+  try {
+    const argv1 = process.argv[1] ? resolve(String(process.argv[1])) : '';
+    if (argv1 && existsSync(argv1)) {
+      const base = argv1.split(/[/\\]/).pop() || '';
+      // bun bin/brain.mjs  |  linked `brain` shim that ends in brain.mjs
+      if (/^brain(\.mjs)?$/i.test(base) || base === 'brain') {
+        return argv1;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return existsSync(BRAIN_BIN_PKG) ? BRAIN_BIN_PKG : BRAIN_BIN_PKG;
+}
+
+/**
+ * Host default agent for Angela (name: "default").
+ * Used when a brain project has no .angela/agents/*.coffee, or when a file
+ * agent omits keys (allowlist / mcp / …). Not written to disk.
+ *
+ * System prompt is intentionally omitted here — built lazily from
+ * ontology.coffee `buildOntologySystemPrompt` right before each chat turn
+ * (see applyBrainSystemPrompt). That is the authoritative browser prompt.
+ *
+ * MCP `brain` server is always defined here with dynamic paths:
+ *   - command/args → current runtime + resolveBrainBin()
+ *   - cwd → active brain CLI cwd (same scope as `brain viz` / server RPC)
+ *
+ * @param {{ brainBin?: string, brainCwd?: string }} [cfg]
+ */
+export function createBrainDefaultAgent(cfg = {}) {
+  const bin = resolve(
+    cfg.brainBin || resolveBrainBin(),
+  ).replaceAll('\\', '/');
+  // Prefer explicit brainCwd (from viz CLI), else process.cwd() — the same
+  // directory brain commands use for paths()/socket resolution.
+  const cwd = resolve(
+    cfg.brainCwd || process.cwd(),
+  ).replaceAll('\\', '/');
+  return {
+    name: 'default',
+    description:
+      'Explore and edit the local knowledge graph via brain MCP tools',
+    mcp: [
+      {
+        name: 'brain',
+        command: process.execPath,
+        args: [bin, 'mcp'],
+        cwd,
+      },
+    ],
+    // system: omitted — applyBrainSystemPrompt() before each session.run
+    // Edit tools intentionally off allowlist → approval prompt
+    allowlist: [
+      'brain__search',
+      'brain__search:.*',
+      'brain__think',
+      'brain__think:.*',
+      'brain__ontology',
+      'brain__ontology:.*',
+      'brain__graph',
+      'brain__graph:.*',
+      'brain__graphql',
+      'brain__graphql:.*',
+      'brain__get_entity',
+      'brain__get_entity:.*',
+      'brain__schema_methods',
+      'brain__schema_methods:.*',
+      'brain__method_invoke',
+      'brain__method_invoke:.*',
+      'brain__schema_orphans',
+      'brain__schema_orphans:.*',
+    ].join('\n'),
+    policyMode: 'ask',
+    // starters omitted — welcome chips off until a project agent opts in
+  };
+}
+
+/**
+ * Lazy system prompt for viz chat — same identity as ontology.coffee, freeform
+ * (no final_answer tool). Call immediately before session.run / Agent.factory.
+ *
+ * @param {{
+ *   model?: string|null,
+ *   thinking?: boolean,
+ *   entCtx?: string,
+ * }} [opts]
+ * @returns {string}
+ */
+export function buildBrainChatSystemPrompt(opts = {}) {
+  return buildOntologySystemPrompt({
+    model: opts.model,
+    thinking: opts.thinking,
+    entCtx: opts.entCtx || '',
+    freeform: true,
+  });
+}
+
+/**
+ * Apply authoritative ontology system prompt onto a live Angela harness.
+ * Safe before first run (updates create config) or after (mutates agent).
+ *
+ * @param {import('angela').Angela} harness
+ * @param {{ model?: string|null, thinking?: boolean, entCtx?: string }} [opts]
+ */
+export function applyBrainSystemPrompt(harness, opts = {}) {
+  if (!harness) return;
+  const system = buildBrainChatSystemPrompt(opts);
+  if (typeof harness.setSystemPrompt === 'function') {
+    harness.setSystemPrompt(system);
+  } else if (harness.session) {
+    // Fallback: poke live agent if any
+    for (const id of harness.session.list?.() || []) {
+      const s = harness.session.get?.(id);
+      if (s?.agent) s.agent.system_prompt = system;
+    }
+  }
+  return system;
+}
 
 /**
  * @param {{
@@ -54,17 +184,32 @@ const DEFAULT_AGENT_SRC = join(BRAIN_PKG, 'share', 'angela', 'agents', 'brain.co
  *   autoApprove?: boolean,
  *   mcpRoot?: string,
  *   brainCwd?: string,
+ *   fetchEntity?: (slug: string) => Promise<object|null>,
  * }} opts
+ * fetchEntity — optional; after put_entity/method_invoke, load a snapshot for
+ * the SPA entity-model via NDJSON `entity_changed`.
  */
 export function createChatApi(opts) {
   const PROJECT_ROOT = resolveProjectRoot(
     opts.projectRoot || process.cwd(),
   );
   ensureAngelaLayout(PROJECT_ROOT);
-  ensureDefaultBrainAgent(PROJECT_ROOT, {
-    brainBin: BRAIN_BIN,
-    brainCwd: opts.brainCwd || PROJECT_ROOT,
-  });
+
+  // CLI / db scope for MCP brain server (paths(), socket). Prefer caller
+  // (viz passes its command cwd); else process.cwd().
+  const brainCwd = opts.brainCwd || process.cwd();
+  /** @type {((slug: string) => Promise<object|null>)|null} */
+  const fetchEntity =
+    typeof opts.fetchEntity === 'function' ? opts.fetchEntity : null;
+  // Register Angela app-level default agent (virtual name "default").
+  // Appears in the UI only when no disk agents exist under .angela/agents/.
+  // MCP paths are resolved at factory call time (running bin + active cwd).
+  setDefaultAgent(() =>
+    createBrainDefaultAgent({
+      brainBin: resolveBrainBin(),
+      brainCwd,
+    }),
+  );
 
   const MCP_ROOT = opts.mcpRoot || process.env.ANGELA_MCP_ROOT || defaultMcpRoot();
   const AUTO_APPROVE =
@@ -76,6 +221,10 @@ export function createChatApi(opts) {
   const tabQueues = new Map();
   /** tabId → { text, overridden } stash before first chat creates a session */
   const pendingAllowlists = new Map();
+  /** tabId → { enabled: string[]|null, overridden } stash before first chat */
+  const pendingToolsEnabled = new Map();
+  /** agentName → tool catalog cache (listToolCatalog shape) */
+  const toolsCatalogCache = new Map();
 
   function store() {
     return new SessionStore(PROJECT_ROOT);
@@ -139,6 +288,8 @@ export function createChatApi(opts) {
           contextWindows,
           description: a.description || '',
           allowlist: a.allowlist || '',
+          // null = all tools enabled by default (agent coffee omitted toolsEnabled)
+          toolsEnabled: a.toolsEnabled ?? null,
           starters: Array.isArray(a.starters) ? a.starters : null,
         };
       }),
@@ -435,12 +586,162 @@ export function createChatApi(opts) {
     }
   }
 
+  /**
+   * Apply toolsEnabled to a live tab entry (filters AGL agent.tools).
+   * @param {object} entry
+   * @param {string[]|null} enabled null = all tools
+   * @param {{ persist?: boolean, source?: string }} [opts]
+   */
+  function applyToolsEnabledToEntry(
+    entry,
+    enabled,
+    { persist = false, source = 'ui' } = {},
+  ) {
+    const te = enabled == null ? null : normalizeToolsEnabled(enabled) ?? [];
+    entry.toolsEnabled = te;
+    entry.toolsEnabledSource = source;
+    entry.toolsEnabledOverridden =
+      source === 'ui' || String(source || '').startsWith('file:');
+    if (entry.harness?.setToolsEnabled) {
+      entry.harness.setToolsEnabled(te);
+    }
+    if (persist && entry.session?.id && entry.harness?.sessionStore) {
+      const st = entry.harness.sessionStore.load(entry.session.id);
+      const overrides = { ...(st?.overrides || {}) };
+      if (entry.toolsEnabledOverridden) {
+        overrides.toolsEnabled = {
+          from: st?.toolsEnabledSource || 'agent',
+          to: source,
+        };
+      } else {
+        delete overrides.toolsEnabled;
+      }
+      entry.harness.sessionStore.updateMeta(entry.session.id, {
+        toolsEnabledSource: source,
+        toolsEnabled: entry.toolsEnabledOverridden ? te : null,
+        overrides: Object.keys(overrides).length ? overrides : null,
+      });
+      entry.harness.sessionStore.appendEvent(entry.session.id, {
+        event_type: 'session',
+        payload: {
+          kind: 'tools_enabled_updated',
+          source,
+          count: te == null ? null : te.length,
+        },
+      });
+    }
+  }
+
+  /**
+   * Resolve full tool catalog for an agent (MCP + angela builtins).
+   * Prefers a live tab's session; otherwise spins an ephemeral harness.
+   */
+  async function resolveToolCatalog(agentName, tabId = null) {
+    if (tabId && liveTabs.has(tabId)) {
+      const entry = liveTabs.get(tabId);
+      if (entry?.session?.listToolCatalog) {
+        try {
+          const tools = await entry.session.listToolCatalog();
+          toolsCatalogCache.set(entry.agentName || agentName, tools);
+          return {
+            tools,
+            toolsEnabled: entry.toolsEnabled ?? null,
+            toolsEnabledSource: entry.toolsEnabledSource || 'agent',
+            agent: entry.agentName,
+            live: true,
+          };
+        } catch (err) {
+          console.warn(
+            '[viz-chat] listToolCatalog on live tab failed:',
+            err?.message || err,
+          );
+        }
+      }
+    }
+
+    if (toolsCatalogCache.has(agentName)) {
+      const def = await loadAgentSafe(agentName);
+      return {
+        tools: toolsCatalogCache.get(agentName),
+        toolsEnabled: def?.toolsEnabled ?? null,
+        toolsEnabledSource: 'agent',
+        agent: agentName,
+        live: false,
+        cached: true,
+      };
+    }
+
+    const def = await loadAgentSafe(agentName);
+    if (!def) {
+      return {
+        tools: [],
+        toolsEnabled: null,
+        toolsEnabledSource: 'agent',
+        agent: agentName,
+        error: `agent not found: ${agentName}`,
+      };
+    }
+
+    const mcp = (def.mcp || []).filter((entry) => {
+      const script = entry?.args?.[0];
+      if (script && !existsSync(script)) return false;
+      return true;
+    });
+
+    let harness = null;
+    try {
+      harness = await Angela.create({
+        model: def.model,
+        mcp,
+        allowlist: def.allowlist || DEFAULT_LUCY_ALLOWLIST,
+        toolsEnabled: def.toolsEnabled ?? null,
+        policyMode: def.policyMode || 'ask',
+        system: def.system || 'catalog probe',
+        projectRoot: PROJECT_ROOT,
+        agentName: def.name,
+        persistSessions: false,
+        stream: false,
+      });
+      const session = await harness.session.create({ agent: def.name });
+      const tools = await session.listToolCatalog();
+      toolsCatalogCache.set(agentName, tools);
+      return {
+        tools,
+        toolsEnabled: def.toolsEnabled ?? null,
+        toolsEnabledSource: 'agent',
+        agent: def.name,
+        live: false,
+      };
+    } catch (err) {
+      console.error(
+        '[viz-chat] tool catalog probe failed:',
+        agentName,
+        err?.message || err,
+      );
+      return {
+        tools: [],
+        toolsEnabled: def.toolsEnabled ?? null,
+        toolsEnabledSource: 'agent',
+        agent: agentName,
+        error: err?.message || String(err),
+      };
+    } finally {
+      try {
+        await harness?.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   async function ensureLiveTab({
     tabId,
     agentName,
     model,
     allowlist,
     allowlistOverridden = false,
+    toolsEnabled = undefined,
+    toolsEnabledOverridden = false,
     forceNew,
     resumeSessionId = null,
   }) {
@@ -457,6 +758,12 @@ export function createChatApi(opts) {
     ) {
       if (allowlistOverridden && allowlist != null) {
         applyAllowlistToEntry(existing, allowlist, {
+          persist: true,
+          source: 'ui',
+        });
+      }
+      if (toolsEnabledOverridden) {
+        applyToolsEnabledToEntry(existing, toolsEnabled ?? [], {
           persist: true,
           source: 'ui',
         });
@@ -510,6 +817,26 @@ export function createChatApi(opts) {
       allowlistSource = 'ui';
     }
 
+    // toolsEnabled: UI override > session resume > agent def (null = all tools)
+    let effectiveToolsEnabled =
+      def.toolsEnabled == null ? null : [...def.toolsEnabled];
+    let toolsEnabledSource = def.toolsEnabled != null ? 'agent' : 'default';
+    if (toolsEnabledOverridden) {
+      effectiveToolsEnabled =
+        toolsEnabled == null ? [] : normalizeToolsEnabled(toolsEnabled) ?? [];
+      toolsEnabledSource = 'ui';
+      overrides.toolsEnabled = {
+        from: def.toolsEnabled != null ? 'agent' : 'default',
+        to: 'ui',
+      };
+    } else if (
+      resumeState?.toolsEnabledSource === 'ui' &&
+      resumeState.toolsEnabled != null
+    ) {
+      effectiveToolsEnabled = normalizeToolsEnabled(resumeState.toolsEnabled) ?? [];
+      toolsEnabledSource = 'ui';
+    }
+
     const contextWindow = await resolveContextWindowAsync(effectiveModel, {
       default: resumeState?.contextWindow || def.contextWindow || 32_768,
       force: true,
@@ -524,13 +851,17 @@ export function createChatApi(opts) {
       return true;
     });
 
+    // System prompt is NOT taken from agent coffee / createBrainDefaultAgent.
+    // It is applied lazily via applyBrainSystemPrompt() immediately before
+    // each session.run (ontology.coffee is authoritative).
     const harness = await Angela.create({
       model: effectiveModel,
       mcp,
       allowlist: effectiveAllowlist,
       allowlistSource,
+      toolsEnabled: effectiveToolsEnabled,
       policyMode: def.policyMode || 'ask',
-      system: def.system,
+      system: null,
       contextWindow,
       projectRoot: PROJECT_ROOT,
       agentName: def.name,
@@ -561,6 +892,10 @@ export function createChatApi(opts) {
       allowlistSource,
       allowlistOverridden: allowlistSource === 'ui',
       agentAllowlist: def.allowlist || DEFAULT_LUCY_ALLOWLIST,
+      toolsEnabled: effectiveToolsEnabled,
+      toolsEnabledSource,
+      toolsEnabledOverridden: toolsEnabledSource === 'ui',
+      agentToolsEnabled: def.toolsEnabled ?? null,
       contextWindow,
       tokensUsed: Number(resumeState?.lastPromptTokens) || 0,
       lastPromptTokens:
@@ -583,6 +918,15 @@ export function createChatApi(opts) {
     }
     pendingAllowlists.delete(tabId);
 
+    const pendingTe = pendingToolsEnabled.get(tabId);
+    if (pendingTe?.overridden && !toolsEnabledOverridden) {
+      applyToolsEnabledToEntry(entry, pendingTe.enabled ?? [], {
+        persist: true,
+        source: 'ui',
+      });
+    }
+    pendingToolsEnabled.delete(tabId);
+
     liveTabs.set(tabId, entry);
     return entry;
   }
@@ -591,7 +935,7 @@ export function createChatApi(opts) {
     const body = await req.json();
     const tabId = String(body.tabId || '1');
     const content = String(body.content || '').trim();
-    const agentName = String(body.agent || 'brain');
+    const agentName = String(body.agent || 'default');
     const model = body.model ? String(body.model) : null;
     let allowlist =
       body.allowlist != null ? String(body.allowlist) : undefined;
@@ -601,6 +945,18 @@ export function createChatApi(opts) {
       if (p?.overridden) {
         allowlist = p.text;
         allowlistOverridden = true;
+      }
+    }
+    let toolsEnabled =
+      body.toolsEnabled != null
+        ? normalizeToolsEnabled(body.toolsEnabled)
+        : undefined;
+    let toolsEnabledOverridden = Boolean(body.toolsEnabledOverridden);
+    if (!toolsEnabledOverridden && pendingToolsEnabled.has(tabId)) {
+      const p = pendingToolsEnabled.get(tabId);
+      if (p?.overridden) {
+        toolsEnabled = p.enabled;
+        toolsEnabledOverridden = true;
       }
     }
     const forceNew = Boolean(body.newSession);
@@ -671,6 +1027,8 @@ export function createChatApi(opts) {
             model,
             allowlist,
             allowlistOverridden,
+            toolsEnabled,
+            toolsEnabledOverridden,
             forceNew,
             resumeSessionId: forceNew ? null : resumeSessionId,
           });
@@ -678,6 +1036,12 @@ export function createChatApi(opts) {
           entry.harness.policy.onApproval = onApproval;
           if (allowlistOverridden && allowlist != null) {
             applyAllowlistToEntry(entry, allowlist, {
+              persist: Boolean(entry.session?.id),
+              source: 'ui',
+            });
+          }
+          if (toolsEnabledOverridden) {
+            applyToolsEnabledToEntry(entry, toolsEnabled ?? [], {
               persist: Boolean(entry.session?.id),
               source: 'ui',
             });
@@ -790,6 +1154,10 @@ export function createChatApi(opts) {
               return;
             }
             if (ev.type === 'tool_call') {
+              entry._lastToolCall = {
+                name: ev.name,
+                args: ev.args && typeof ev.args === 'object' ? ev.args : {},
+              };
               pushCard({
                 kind: 'tool_call',
                 name: ev.name,
@@ -815,6 +1183,8 @@ export function createChatApi(opts) {
                 full_chars: ev.full_chars,
                 truncated: ev.truncated,
               });
+              // SPA entity cache: push snapshot after graph mutations
+              void emitEntityChanged(entry, ev, send, fetchEntity);
               return;
             }
             // Pass-through for other harness events (status, final, error, …)
@@ -839,23 +1209,30 @@ export function createChatApi(opts) {
             projectRoot: PROJECT_ROOT,
           });
 
-          // Optional context prepended to the user turn:
+          // Optional entity YAML for the system prompt (same blocks ontology uses):
           //   selectionContext   — graph multi-select (toggle)
           //   referencedContext  — wiki-link entities in the prompt (preloaded YAML)
-          let prompt = content;
-          const ctxChunks = [];
+          const entCtxParts = [];
           if (body.selectionContext && String(body.selectionContext).trim()) {
-            ctxChunks.push(String(body.selectionContext).trim());
+            entCtxParts.push(String(body.selectionContext).trim());
           }
           if (body.referencedContext && String(body.referencedContext).trim()) {
-            ctxChunks.push(String(body.referencedContext).trim());
+            entCtxParts.push(String(body.referencedContext).trim());
           }
           if (body.entityContext && String(body.entityContext).trim()) {
-            ctxChunks.push(String(body.entityContext).trim());
+            entCtxParts.push(String(body.entityContext).trim());
           }
-          if (ctxChunks.length) {
-            prompt = ctxChunks.join('\n\n') + '\n\n---\n\n' + content;
-          }
+          const entCtx = entCtxParts.join('\n');
+
+          // Lazy system prompt (ontology.coffee) — right before Agent.factory / run
+          applyBrainSystemPrompt(entry.harness, {
+            model: entry.model,
+            thinking: Boolean(body.thinking),
+            entCtx,
+          });
+
+          // User turn is the raw message only (entity bodies live in system now)
+          const prompt = content;
 
           const result = await entry.session.run({ prompt });
           const text =
@@ -1012,6 +1389,117 @@ export function createChatApi(opts) {
     return Response.json({ ok: true });
   }
 
+  async function handleToolsCatalog(req) {
+    const url = new URL(req.url);
+    const agentName = url.searchParams.get('agent') || 'brain';
+    const tabId = url.searchParams.get('tabId') || null;
+    const result = await resolveToolCatalog(agentName, tabId);
+    return Response.json(result);
+  }
+
+  async function handleToolsEnabled(req) {
+    const body = await req.json().catch(() => ({}));
+    const tabId = String(body.tabId || '1');
+    const sessionId = body.sessionId ? String(body.sessionId) : null;
+    const overridden = body.overridden !== false;
+    /** @type {string[]|null} */
+    let enabled = null;
+    if (overridden) {
+      if (body.toolsEnabled == null) {
+        enabled = [];
+      } else {
+        enabled = normalizeToolsEnabled(body.toolsEnabled) ?? [];
+      }
+    }
+
+    const entry = liveTabs.get(tabId);
+    if (entry) {
+      if (!overridden) {
+        const agentBase = entry.agentToolsEnabled ?? null;
+        applyToolsEnabledToEntry(entry, agentBase, {
+          persist: true,
+          source: entry.agentToolsEnabled != null ? 'agent' : 'default',
+        });
+        return Response.json({
+          ok: true,
+          sessionId: entry.session?.id,
+          toolsEnabled: entry.toolsEnabled,
+          toolsEnabledSource: entry.toolsEnabledSource,
+          overridden: false,
+        });
+      }
+      applyToolsEnabledToEntry(entry, enabled, {
+        persist: true,
+        source: 'ui',
+      });
+      return Response.json({
+        ok: true,
+        sessionId: entry.session?.id,
+        toolsEnabled: entry.toolsEnabled,
+        toolsEnabledSource: 'ui',
+        overridden: true,
+      });
+    }
+
+    // Stash until ensureLiveTab / first chat
+    if (overridden) {
+      pendingToolsEnabled.set(tabId, { enabled, overridden: true });
+    } else {
+      pendingToolsEnabled.delete(tabId);
+    }
+
+    if (sessionId) {
+      const s = store();
+      const st = s.load(sessionId);
+      if (!st) {
+        return Response.json({ error: 'session not found' }, { status: 404 });
+      }
+      if (!overridden) {
+        s.updateMeta(sessionId, {
+          toolsEnabledSource: st.agent ? 'agent' : 'default',
+          toolsEnabled: null,
+          overrides: (() => {
+            const o = { ...(st.overrides || {}) };
+            delete o.toolsEnabled;
+            return Object.keys(o).length ? o : null;
+          })(),
+        });
+        return Response.json({
+          ok: true,
+          sessionId,
+          toolsEnabledSource: 'agent',
+          overridden: false,
+        });
+      }
+      const overrides = { ...(st.overrides || {}) };
+      overrides.toolsEnabled = {
+        from: st.toolsEnabledSource || 'agent',
+        to: 'ui',
+      };
+      s.updateMeta(sessionId, {
+        toolsEnabledSource: 'ui',
+        toolsEnabled: enabled,
+        overrides,
+      });
+      return Response.json({
+        ok: true,
+        sessionId,
+        toolsEnabled: enabled,
+        toolsEnabledSource: 'ui',
+        overridden: true,
+      });
+    }
+
+    return Response.json({
+      ok: true,
+      sessionId: null,
+      pending: true,
+      toolsEnabled: enabled,
+      toolsEnabledSource: overridden ? 'ui' : null,
+      overridden,
+    });
+  }
+
   async function handleAllowlist(req) {
     const body = await req.json().catch(() => ({}));
     const tabId = String(body.tabId || '1');
@@ -1150,6 +1638,10 @@ export function createChatApi(opts) {
     if (req.method === 'POST' && path === '/api/abort') return handleAbort(req);
     if (req.method === 'POST' && path === '/api/session/new') return handleNewSession(req);
     if (req.method === 'POST' && path === '/api/allowlist') return handleAllowlist(req);
+    if (req.method === 'GET' && path === '/api/tools') return handleToolsCatalog(req);
+    if (req.method === 'POST' && path === '/api/tools-enabled') {
+      return handleToolsEnabled(req);
+    }
     if (req.method === 'GET' && path === '/api/health') return handleHealth();
     if (req.method === 'GET' && path === '/api/agents') return handleAgents();
     if (req.method === 'GET' && path === '/api/context-window') return handleContextWindow(req);
@@ -1187,101 +1679,65 @@ export function createChatApi(opts) {
 }
 
 /**
- * Install share/angela/agents/brain.coffee into project if no agents exist.
- * Rewrites BRAIN_BIN / BRAIN_CWD placeholders for the local install.
+ * After put_entity / delete_entity / method_invoke succeed, notify the SPA so
+ * entity-model can upsert/delete without the UI re-fetching ad hoc.
+ *
+ * @param {object} entry live tab
+ * @param {object} ev tool_result event
+ * @param {(obj: object) => void} send NDJSON writer
+ * @param {((slug: string) => Promise<object|null>)|null} fetchEntity
  */
-function ensureDefaultBrainAgent(projectRoot, { brainBin, brainCwd }) {
-  const agentsDir = join(projectRoot, '.angela', 'agents');
+async function emitEntityChanged(entry, ev, send, fetchEntity) {
+  if (!ev || ev.ok === false || ev.denied) return;
+  const name = String(ev.name || '');
+  const isPut = /(?:^|__)put_entity$/i.test(name);
+  const isDel = /(?:^|__)delete_entity$/i.test(name);
+  const isMethod = /(?:^|__)method_invoke$/i.test(name);
+  if (!isPut && !isDel && !isMethod) return;
+
+  const pending = entry?._lastToolCall;
+  const args =
+    pending && pending.name === ev.name
+      ? pending.args || {}
+      : {};
+  let slug =
+    args.slug != null && String(args.slug).trim()
+      ? String(args.slug).trim()
+      : '';
+  if (!slug && ev.text) {
+    const m = String(ev.text).match(/(?:^|\n)\s*slug:\s*['"]?([^\s'"#,]+)/i);
+    if (m) slug = m[1].trim();
+  }
+  if (!slug) return;
+
   try {
-    mkdirSync(agentsDir, { recursive: true });
-  } catch {
-    /* ignore */
-  }
-  // Only seed when the agents dir is empty (don't clobber user agents).
-  let hasAny = false;
-  try {
-    hasAny = readdirSync(agentsDir).some((f) =>
-      /\.(coffee|mjs|js)$/.test(f),
-    );
-  } catch {
-    hasAny = false;
-  }
-  if (hasAny) return;
-
-  let src = '';
-  if (existsSync(DEFAULT_AGENT_SRC)) {
-    src = readFileSync(DEFAULT_AGENT_SRC, 'utf8');
-  } else {
-    src = defaultBrainAgentCoffee();
-  }
-  src = src
-    .replaceAll('__BRAIN_BIN__', brainBin.replaceAll('\\', '/'))
-    .replaceAll('__BRAIN_CWD__', brainCwd.replaceAll('\\', '/'));
-  const dest = join(agentsDir, 'brain.coffee');
-  writeFileSync(dest, src);
-  console.log(`[viz-chat] installed default agent → ${dest}`);
-}
-
-function defaultBrainAgentCoffee() {
-  return `# brain — knowledge-graph agent for brain viz chat
-# Auto-installed into .angela/agents/ when missing.
-
-module.exports = (ctx) ->
-  name: 'brain'
-  description: 'Explore and edit the local knowledge graph via brain MCP tools'
-  model: process.env.FAV_LOCAL_LLM or 'lm-studio:google/gemma-4-26b-a4b-qat'
-  models: Array.from(new Set([
-    process.env.FAV_LOCAL_LLM or null
-    'lm-studio:google/gemma-4-26b-a4b-qat'
-    'copilot:gpt-5.6-luna'
-  ].filter(Boolean)))
-  mcp: [
-    {
-      name: 'brain'
-      command: process.execPath
-      args: ['__BRAIN_BIN__', 'mcp']
-      cwd: '__BRAIN_CWD__'
+    if (isDel) {
+      send({ type: 'entity_changed', slug, deleted: true });
+      return;
     }
-  ]
-  system: '''
-    You are a knowledge-graph assistant embedded in the brain viz explorer.
-    Use brain MCP tools (search, graph, graphql, get_entity, put_entity, …)
-    to answer questions about entities and their relationships.
-    Prefer precise tool use over guessing. Cite entities as Class/id slugs.
-    When the user has graph nodes selected, treat them as deictic context
-    ("this", "these", "the selected node"). Be concise; use Markdown.
-  '''
-  allowlist: '''
-    brain__search
-    brain__search:.*
-    brain__think
-    brain__think:.*
-    brain__ontology
-    brain__ontology:.*
-    brain__graph
-    brain__graph:.*
-    brain__graphql
-    brain__graphql:.*
-    brain__get_entity
-    brain__get_entity:.*
-    brain__put_entity
-    brain__put_entity:.*
-    brain__delete_entity
-    brain__delete_entity:.*
-    brain__schema_methods
-    brain__schema_methods:.*
-    brain__method_invoke
-    brain__method_invoke:.*
-    brain__schema_orphans
-    brain__schema_orphans:.*
-  '''
-  policyMode: 'ask'
-  starters: [
-    'What tools do you have? List them briefly.'
-    'Summarize what this knowledge graph is about.'
-    { label: 'Explore selection', prompt: 'Inspect the currently selected entities and summarize who/what they are and how they connect.' }
-  ]
-`;
+    if (fetchEntity) {
+      try {
+        const entity = await fetchEntity(slug);
+        if (entity && !entity.error) {
+          send({
+            type: 'entity_changed',
+            slug,
+            entity: { ...entity, slug },
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn(
+          '[viz-chat] fetchEntity after mutation failed:',
+          err?.message || err,
+        );
+      }
+    }
+    // Client will refetch via /nodes
+    send({ type: 'entity_changed', slug, stale: true });
+  } catch (err) {
+    console.warn('[viz-chat] entity_changed emit failed:', err?.message || err);
+  }
 }
 
 export default createChatApi;

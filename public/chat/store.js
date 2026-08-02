@@ -26,7 +26,7 @@ const mdRenderer = {
     }
     if (slug) {
       const safe = slug.replace(/"/g, '&quot;');
-      return `<a class="md-entity entity-link" data-entity="${safe}" href="/e/${encodeURIComponent(slug)}" title="${safe}"><i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>${text}</a>`;
+      return `<a class="entity-pill md-entity entity-link" data-entity="${safe}" href="/e/${encodeURIComponent(slug)}" title="${safe}"><i class="ph ph-cube entity-link-icon entity-link-icon-ready" aria-hidden="true"></i><span class="entity-pill-label">${text}</span></a>`;
     }
     const t = title ? ` title="${String(title).replace(/"/g, '&quot;')}"` : '';
     return `<a href="${h.replace(/"/g, '&quot;')}"${t} target="_blank" rel="noopener noreferrer">${text}</a>`;
@@ -265,13 +265,23 @@ export function registerChatStore() {
         input: '',
         waiting: false,
         isNew: true,
-        agent: 'brain',
+        // Filled from /api/agents on bootstrap (first listed agent, often sole real agent or "default")
+        agent: '',
         model: '',
         allowlist: '',
         allowlistBaseline: '',
         allowlistOverridden: false,
         allowlistOpen: false,
         allowlistInited: false,
+        // toolsEnabled: null = all tools (agent default); string[] = subset
+        toolsEnabled: null,
+        toolsEnabledBaseline: null,
+        toolsEnabledOverridden: false,
+        toolsPanelOpen: false,
+        toolsCatalog: [],
+        toolsCatalogLoading: false,
+        toolsCatalogError: '',
+        toolsInited: false,
         sessionId: null,
         contextWindow: 32768,
         tokensUsed: 0,
@@ -355,6 +365,27 @@ export function registerChatStore() {
     },
     get allowlistOverridden() {
       return Boolean(this.activeTab?.allowlistOverridden);
+    },
+    get toolsPanelOpen() {
+      return Boolean(this.activeTab?.toolsPanelOpen);
+    },
+    get toolsEnabledOverridden() {
+      return Boolean(this.activeTab?.toolsEnabledOverridden);
+    },
+    get toolsCatalog() {
+      return this.activeTab?.toolsCatalog || [];
+    },
+    get toolsCatalogLoading() {
+      return Boolean(this.activeTab?.toolsCatalogLoading);
+    },
+    get toolsCatalogError() {
+      return this.activeTab?.toolsCatalogError || '';
+    },
+    get toolsEnabledCount() {
+      const tab = this.activeTab;
+      if (!tab) return 0;
+      if (Array.isArray(tab.toolsEnabled)) return tab.toolsEnabled.length;
+      return (tab.toolsCatalog || []).length;
     },
     get draftInput() {
       return this.activeTab?.input ?? '';
@@ -531,10 +562,14 @@ export function registerChatStore() {
           console.warn(
             '[chat] no agents from',
             this.projectRoot,
-            '— expected .angela/agents/*.coffee',
+            '— expected .angela/agents/*.coffee or Angela setDefaultAgent()',
           );
         }
-        this.applyAgentDefaults(this.activeTab);
+        // Prefer first catalog agent when tab has none / stale name (e.g. "brain"
+        // after only "default" remains, or empty blankTab).
+        for (const tab of this.tabs || []) {
+          this.applyAgentDefaults(tab);
+        }
         this.syncSelects();
       } catch (err) {
         console.error('[chat] bootstrap failed', err);
@@ -545,6 +580,9 @@ export function registerChatStore() {
       if (!tab || !this.agents.length) return;
       let a = this.agents.find((x) => x.name === tab.agent);
       if (!a) {
+        // No stored selection / unknown name → first catalog entry.
+        // listAgents already hides virtual "default" when any disk agent exists,
+        // so a single real agent becomes the automatic selection.
         a = this.agents[0];
         tab.agent = a.name;
       }
@@ -557,6 +595,10 @@ export function registerChatStore() {
       if (!tab.allowlistInited || !tab.allowlistOverridden) {
         tab.allowlistInited = true;
         this.loadAgentAllowlist(tab);
+      }
+      if (!tab.toolsInited || !tab.toolsEnabledOverridden) {
+        tab.toolsInited = true;
+        this.loadAgentToolsEnabled(tab);
       }
     },
 
@@ -591,6 +633,30 @@ export function registerChatStore() {
       tab.allowlistOverridden = false;
     },
 
+    /**
+     * Apply agent coffee toolsEnabled default (null = all tools).
+     * Does not fetch catalog; that happens when the wrench panel opens.
+     */
+    loadAgentToolsEnabled(tab) {
+      const a = this.agents.find((x) => x.name === tab.agent);
+      const te = a?.toolsEnabled ?? null;
+      tab.toolsEnabledBaseline =
+        te == null ? null : Array.isArray(te) ? [...te] : null;
+      tab.toolsEnabled =
+        te == null ? null : Array.isArray(te) ? [...te] : null;
+      tab.toolsEnabledOverridden = false;
+      tab.toolsCatalog = [];
+      tab.toolsCatalogError = '';
+    },
+
+    /** Whether a catalog tool name is currently enabled for the active tab. */
+    isToolEnabled(name) {
+      const tab = this.activeTab;
+      if (!tab) return true;
+      if (tab.toolsEnabled == null) return true;
+      return tab.toolsEnabled.includes(name);
+    },
+
     onAgentChange(ev) {
       const tab = this.activeTab;
       if (!tab) return;
@@ -603,6 +669,8 @@ export function registerChatStore() {
         this.applyModelContextWindow(tab);
         this.loadAgentAllowlist(tab);
         tab.allowlistInited = true;
+        this.loadAgentToolsEnabled(tab);
+        tab.toolsInited = true;
       }
       tab.sessionId = null;
       this.syncSelects();
@@ -632,6 +700,7 @@ export function registerChatStore() {
       const tab = this.activeTab;
       if (!tab) return;
       tab.allowlistOpen = !tab.allowlistOpen;
+      if (tab.allowlistOpen) tab.toolsPanelOpen = false;
     },
 
     async onAllowlistBlur() {
@@ -651,6 +720,148 @@ export function registerChatStore() {
         });
       } catch (err) {
         console.error('allowlist save failed', err);
+      }
+    },
+
+    async toggleToolsPanel() {
+      const tab = this.activeTab;
+      if (!tab) return;
+      tab.toolsPanelOpen = !tab.toolsPanelOpen;
+      if (tab.toolsPanelOpen) {
+        tab.allowlistOpen = false;
+        await this.ensureToolsCatalog(tab);
+      }
+    },
+
+    /**
+     * Load MCP + builtin tool catalog for the tab's agent (cached per open).
+     * Marks each row checked from toolsEnabled (null = all checked).
+     */
+    async ensureToolsCatalog(tab) {
+      if (!tab) return;
+      if (tab.toolsCatalogLoading) return;
+      tab.toolsCatalogLoading = true;
+      tab.toolsCatalogError = '';
+      try {
+        const q = new URLSearchParams({
+          agent: tab.agent || this.agents[0]?.name || 'default',
+        });
+        if (tab.id != null) q.set('tabId', String(tab.id));
+        const res = await fetch(`/api/tools?${q}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || res.statusText || 'tools fetch failed');
+        }
+        const tools = Array.isArray(data.tools) ? data.tools : [];
+        tab.toolsCatalog = tools.map((t) => ({
+          name: t.name,
+          description: t.description || '',
+        }));
+        // If still on agent default and toolsEnabled is null, leave as null (all).
+        // If agent defined a list, keep it. If UI already overrode, keep selection
+        // but drop names that no longer exist.
+        if (tab.toolsEnabled != null) {
+          const known = new Set(tab.toolsCatalog.map((t) => t.name));
+          tab.toolsEnabled = tab.toolsEnabled.filter((n) => known.has(n));
+        } else if (
+          !tab.toolsEnabledOverridden &&
+          Array.isArray(data.toolsEnabled)
+        ) {
+          // Server reported agent default list
+          tab.toolsEnabledBaseline = [...data.toolsEnabled];
+          tab.toolsEnabled = [...data.toolsEnabled];
+        }
+        if (data.error && !tools.length) {
+          tab.toolsCatalogError = String(data.error);
+        }
+      } catch (err) {
+        console.error('tools catalog failed', err);
+        tab.toolsCatalogError = err?.message || String(err);
+      } finally {
+        tab.toolsCatalogLoading = false;
+      }
+    },
+
+    async setToolEnabled(name, checked) {
+      const tab = this.activeTab;
+      if (!tab || !name) return;
+      const catalog = tab.toolsCatalog || [];
+      const allNames = catalog.map((t) => t.name);
+      let next;
+      if (tab.toolsEnabled == null) {
+        // Was "all tools" — materialize full list then toggle
+        next = allNames.filter((n) => (n === name ? checked : true));
+      } else {
+        const set = new Set(tab.toolsEnabled);
+        if (checked) set.add(name);
+        else set.delete(name);
+        next = allNames.filter((n) => set.has(n));
+      }
+      tab.toolsEnabled = next;
+      tab.toolsEnabledOverridden = this._toolsEnabledDiffersFromBaseline(tab);
+      await this.persistToolsEnabled(tab);
+    },
+
+    async enableAllTools() {
+      const tab = this.activeTab;
+      if (!tab) return;
+      tab.toolsEnabled = (tab.toolsCatalog || []).map((t) => t.name);
+      tab.toolsEnabledOverridden = this._toolsEnabledDiffersFromBaseline(tab);
+      await this.persistToolsEnabled(tab);
+    },
+
+    async disableAllTools() {
+      const tab = this.activeTab;
+      if (!tab) return;
+      tab.toolsEnabled = [];
+      tab.toolsEnabledOverridden = this._toolsEnabledDiffersFromBaseline(tab);
+      await this.persistToolsEnabled(tab);
+    },
+
+    async resetToolsEnabled() {
+      const tab = this.activeTab;
+      if (!tab) return;
+      const base = tab.toolsEnabledBaseline;
+      tab.toolsEnabled =
+        base == null ? null : Array.isArray(base) ? [...base] : null;
+      tab.toolsEnabledOverridden = false;
+      await this.persistToolsEnabled(tab);
+    },
+
+    _toolsEnabledDiffersFromBaseline(tab) {
+      const base = tab.toolsEnabledBaseline;
+      const cur = tab.toolsEnabled;
+      if (base == null && cur == null) return false;
+      if (base == null && cur != null) {
+        // null baseline = all tools; equal if cur is every catalog name
+        const all = (tab.toolsCatalog || []).map((t) => t.name).sort();
+        const sorted = [...cur].sort();
+        return (
+          all.length !== sorted.length ||
+          all.some((n, i) => n !== sorted[i])
+        );
+      }
+      if (base != null && cur == null) return true;
+      const a = [...(base || [])].sort();
+      const b = [...(cur || [])].sort();
+      return a.length !== b.length || a.some((n, i) => n !== b[i]);
+    },
+
+    async persistToolsEnabled(tab) {
+      if (!tab) return;
+      try {
+        await fetch('/api/tools-enabled', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tabId: tab.id,
+            sessionId: tab.sessionId || null,
+            toolsEnabled: tab.toolsEnabled,
+            overridden: Boolean(tab.toolsEnabledOverridden),
+          }),
+        });
+      } catch (err) {
+        console.error('toolsEnabled save failed', err);
       }
     },
 
@@ -1198,6 +1409,10 @@ export function registerChatStore() {
           body.allowlist = tab.allowlist ?? '';
           body.allowlistOverridden = true;
         }
+        if (tab.toolsEnabledOverridden) {
+          body.toolsEnabled = tab.toolsEnabled ?? [];
+          body.toolsEnabledOverridden = true;
+        }
         // Selected entities (toggle) + wiki-referenced entities in the prompt
         try {
           const viz = M.store('viz');
@@ -1502,7 +1717,48 @@ export function registerChatStore() {
       this.noteStreamPaint();
     },
 
+    /**
+     * Agent mutation tools: stash args on tool_call (for diagnostics).
+     * Entity cache updates arrive as NDJSON `entity_changed` (full snapshot
+     * from the server) — views re-render via entity-model subscribers.
+     * @param {{ kind?: string, name?: string, args?: object, ok?: boolean, denied?: boolean, text?: string }} card
+     */
+    maybeRefreshInspectorAfterTool(card) {
+      if (!card?.name) return;
+      const name = String(card.name);
+      const isMut =
+        /(?:^|__)(?:put_entity|delete_entity|method_invoke)$/i.test(name);
+      if (!isMut) return;
+      if (card.kind === 'tool_call') {
+        this._pendingToolMut = { name, args: card.args || {} };
+        return;
+      }
+      if (card.kind === 'tool_result') {
+        this._pendingToolMut = null;
+      }
+      // Prefer server entity_changed event (see handleStreamMsg). No ad-hoc fetch.
+    },
+
+    /**
+     * Push an agent/server entity mutation into the SPA entity-model.
+     * Inspector / labels re-render via model subscribers (no direct DOM fetch).
+     * @param {{ slug?: string, entity?: object, deleted?: boolean, stale?: boolean }} msg
+     */
+    async applyEntityMutation(msg) {
+      if (!msg?.slug) return;
+      try {
+        const { applyServerChange } = await import('/entity-model.js');
+        await applyServerChange(msg);
+      } catch (err) {
+        console.warn('[chat] entity-model apply failed', err);
+      }
+    },
+
     handleStreamMsg(tab, msg) {
+      if (msg.type === 'entity_changed') {
+        void this.applyEntityMutation(msg);
+        return;
+      }
       if (msg.type === 'session') {
         if (msg.sessionId) {
           tab.sessionId = msg.sessionId;
@@ -1622,6 +1878,8 @@ export function registerChatStore() {
             }
           }
           this.noteStreamPaint();
+          // put_entity / delete_entity / … → refresh inspector if slug selected
+          this.maybeRefreshInspectorAfterTool(c);
         }
         if (c.kind === 'approval_needed' && c.id) {
           const existing = tab.messages.find(

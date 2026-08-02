@@ -41,11 +41,14 @@ pidAlive = (pid) ->
     false
 
 # Is a brain server currently running for this db/?  -> { pid, started } | null
+# Requires live PID *and* the unix socket — a lock with dead sock is half-dead
+# (crash mid-flight) and must not count as running.
 export serverRunning = (cwd) ->
   lock = readLock(cwd)
   return null unless lock
-  return lock if pidAlive(lock.pid)
-  null   # stale lock (dead PID) — caller may clean it up
+  return null unless pidAlive(lock.pid)
+  return null unless existsSync(paths(cwd).sock)
+  lock
 
 fmtUptime = (ms) ->
   s = Math.floor(ms / 1000)

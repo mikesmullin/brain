@@ -2,7 +2,7 @@
 #   schema graph                 yaml+mermaid view (graph:, top:, types:) with per-class counts
 #   schema uniq                  unique component / class / relation names
 #   schema components [<name>]   component(s): their fields + methods
-#   schema classes [<name>]      class(es): their components / top / idField
+#   schema classes [<name>]      class(es): their components / top / idField / displayField
 #   schema methods <class>       component methods applicable to a class
 import { loadWorld } from '../world.coffee'
 import { schemaGraph } from '../schema.coffee'
@@ -48,6 +48,8 @@ renderClasses = (schema, names) ->
     throw new Error("unknown class '#{name}'") unless cdef
     lines.push "- #{name}:"
     lines.push "  components: #{inlineMap(cdef.components)}"
+    lines.push "  idField: #{cdef.idField}" if cdef.idField
+    lines.push "  displayField: #{cdef.displayField}" if cdef.displayField
     tops.push(name) if cdef.top
   lines.push "top: [#{tops.sort().join(', ')}]"
   lines.join('\n')

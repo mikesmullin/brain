@@ -61,11 +61,12 @@ function entityLinkHtml(slug, label, hrefFor, opts = {}) {
       ? ` data-rel="${esc(opts.rel)}"`
       : ''
   const display = (label && String(label).trim()) || slug
+  // Same classes as inspector/relation entity-pill — one document click handler
   return (
-    `<a class="md-entity entity-link" data-entity="${esc(slug)}" ` +
+    `<a class="entity-pill md-entity entity-link" data-entity="${esc(slug)}" ` +
     `href="${esc(path)}" title="${esc(slug)}"${fixed}${rel}>` +
-    `<i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>` +
-    `${esc(display)}</a>`
+    `<i class="ph ph-cube entity-link-icon entity-link-icon-ready" aria-hidden="true"></i>` +
+    `<span class="entity-pill-label">${esc(display)}</span></a>`
   )
 }
 
@@ -295,6 +296,8 @@ function expandBareSlugsInHtml(html, hrefFor) {
 
 /**
  * Escape plain text and turn entity refs into chips (for user bubbles).
+ * Escape ONCE via parseMd on placeholder text, then restore already-escaped
+ * anchors — never re-escape inside <a>…</a> (that doubled &amp; for "M & M").
  * @param {string} text
  * @param {{ hrefFor?: (slug: string) => string }} [opts]
  */
@@ -302,21 +305,13 @@ export function renderPlainWithMentions(text, opts = {}) {
   if (!text) return ''
   const hrefFor =
     opts.hrefFor || ((slug) => '/e/' + encodeURIComponent(slug))
-  // Placeholder expand → escape leftover text around restored tags
-  const html = promoteEntityRefsInMarkdown(
+  // Placeholders are private-use digits; escapePlainSegment leaves them intact.
+  // entityLinkHtml already esc()s labels — do not run a second global escape.
+  return promoteEntityRefsInMarkdown(
     String(text),
-    (md) => {
-      // No marked for plain user text — just restore placeholders after expand
-      return md
-    },
+    (md) => escapePlainSegment(md),
     { hrefFor },
   )
-  // promoteEntityRefsInMarkdown with identity parse still does placeholder
-  // restore; escape any remaining plain segments between tags
-  return html.replace(/(^|>)([^<]*)(<|$)/g, (_, pre, mid, post) => {
-    if (!mid) return pre + mid + post
-    return pre + escapePlainSegment(mid) + post
-  })
 }
 
 /**
@@ -334,7 +329,14 @@ export function nameFromPreview(preview, slug) {
   }
   for (const fields of Object.values(preview)) {
     if (!fields || typeof fields !== 'object') continue
-    for (const fname of ['name', 'title', 'label', 'display_name', 'full_name']) {
+    for (const fname of [
+      'name',
+      'title',
+      'label',
+      'display_name',
+      'full_name',
+      'address',
+    ]) {
       const v = fields[fname]
       if (v != null && typeof v !== 'object' && String(v).trim()) {
         return String(v).trim()
@@ -390,13 +392,17 @@ function isEntityChip(el) {
   return Boolean(
     el &&
       el.nodeType === Node.ELEMENT_NODE &&
-      el.matches?.('a.entity-link[data-entity], a.md-entity[data-entity]'),
+      el.matches?.(
+        'a.entity-pill[data-entity], a.entity-link[data-entity], a.md-entity[data-entity]',
+      ),
   )
 }
 
 /**
- * Create the same entity-link chip used in markdown / SERPS / inspector.
+ * Create the same entity-pill chip used in markdown / inspector / relations.
  * contenteditable=false so it acts as an atomic token in the composer.
+ * Clicks are handled by the document-level entity-pill adapter in ui.js
+ * (select / Shift multi / dblclick frame without changing selection).
  * @param {string} slug
  * @param {string} label
  * @param {{ hrefFor?: (slug: string) => string }} [opts]
@@ -405,20 +411,25 @@ export function createMentionPill(slug, label, opts = {}) {
   const hrefFor =
     opts.hrefFor || ((s) => '/e/' + encodeURIComponent(s))
   const a = document.createElement('a')
-  // Same classes as entityLinkHtml / markdown renderers
-  a.className = 'md-entity entity-link'
+  // Same surface as entityLinkHtml / entityPillHtml in ui.js
+  a.className = 'entity-pill md-entity entity-link'
   a.contentEditable = 'false'
   a.dataset.entity = slug
+  a.dataset.labelBound = '1'
   a.href = hrefFor(slug)
   a.title = slug
   a.draggable = false
 
   const icon = document.createElement('i')
-  icon.className = 'ph ph-cube entity-link-icon'
+  icon.className = 'ph ph-cube entity-link-icon entity-link-icon-ready'
   icon.setAttribute('aria-hidden', 'true')
 
+  const lab = document.createElement('span')
+  lab.className = 'entity-pill-label'
+  lab.textContent = label || slug
+
   a.appendChild(icon)
-  a.appendChild(document.createTextNode(label || slug))
+  a.appendChild(lab)
   return a
 }
 
@@ -544,7 +555,7 @@ export function findMentionAtCaret(editor) {
   if (
     range.startContainer.nodeType === Node.ELEMENT_NODE &&
     /** @type {Element} */ (range.startContainer).closest?.(
-      'a.entity-link[data-entity], a.md-entity[data-entity]',
+      'a.entity-pill[data-entity], a.entity-link[data-entity], a.md-entity[data-entity]',
     )
   ) {
     return null
@@ -564,7 +575,7 @@ export function findMentionAtCaret(editor) {
   if (textNode.nodeType !== Node.TEXT_NODE) return null
   if (
     /** @type {Element} */ (textNode.parentElement)?.closest?.(
-      'a.entity-link[data-entity], a.md-entity[data-entity]',
+      'a.entity-pill[data-entity], a.entity-link[data-entity], a.md-entity[data-entity]',
     )
   ) {
     return null
@@ -1058,7 +1069,7 @@ export function syncMentionSelection(root, selected) {
   const scope = root || document
   scope
     .querySelectorAll?.(
-      '.mention-editor a.entity-link[data-entity], .mention-editor a.md-entity[data-entity]',
+      '.mention-editor a.entity-pill[data-entity], .mention-editor a.entity-link[data-entity], .mention-editor a.md-entity[data-entity]',
     )
     .forEach((a) => {
       const slug = a.dataset.entity

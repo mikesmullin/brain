@@ -17,6 +17,14 @@ export noServerError = (cwd) ->
     (If a server was running, it may have crashed — check for a stale #{p.lock})
   """
 
+# Unix-socket / connection failures Bun and Node both surface as "server gone"
+isConnectGone = (err) ->
+  return false unless err?
+  code = err.code or err.errno
+  return true if code in ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTCONN']
+  msg = String(err.message or err)
+  /ENOENT|ECONNREFUSED|ECONNRESET|EPIPE|not known|connect/i.test(msg)
+
 nextId = 0
 
 # One request over the unix socket; resolves with `result` or rejects with the
@@ -24,24 +32,34 @@ nextId = 0
 # run LLM loops for a while, and maintenance gates can hold queries briefly.
 export request = (cwd, method, params = {}) ->
   p = paths(cwd)
+  # Live PID alone is not enough — sock may be gone after a crash (stale .lock).
   throw noServerError(cwd) unless serverRunning(cwd) and existsSync(p.sock)
   id = ++nextId
   new Promise (resolve, reject) ->
-    conn = net.connect p.sock
     buffer = ''
     settled = false
+    conn = null
     fail = (err) ->
       return if settled
       settled = true
-      conn.destroy()
+      try conn?.destroy() catch then undefined
       # translate socket-level failures into the friendly no-server error
-      if err?.code in ['ENOENT', 'ECONNREFUSED', 'ECONNRESET']
+      if isConnectGone(err)
         reject(noServerError(cwd))
       else
         reject(err)
+    try
+      # Bun may throw ENOENT synchronously when the pipe path is missing
+      conn = net.connect p.sock
+    catch err
+      fail(err)
+      return
     conn.on 'error', fail
     conn.on 'connect', ->
-      conn.write JSON.stringify({ id, method, params }) + '\n'
+      try
+        conn.write JSON.stringify({ id, method, params }) + '\n'
+      catch err
+        fail(err)
     conn.on 'data', (chunk) ->
       buffer += chunk.toString('utf8')
       nl = buffer.indexOf('\n')

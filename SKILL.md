@@ -159,6 +159,22 @@ and adding a `REPORTS_TO` edge from the directory's manager. `refine` then:
 slug/filename is derived from a canonical field. This prevents the name-vs-username duplication problem:
 the LLM's arbitrary id is discarded; the id is the username (or a placeholder until resolved).
 
+**`displayField`** — a class can declare `displayField: "alias.field"` (same path form as `idField`) for
+the human-readable label used by entity anchors, search chips, and the viz `/labels` API. Example:
+
+```yaml
+classes:
+  Address:
+    components: { info: AddressInfo }
+    displayField: info.address   # UI shows the street address, not Address/<id>
+  Person:
+    components: { identity: Identity }
+    idField: identity.username
+    displayField: identity.name  # UI shows full name; slug stays the username
+```
+
+When unset, labels fall back to common fields (`name` / `title` / … / `address`) then the slug.
+
 ## Component methods, relation-derived ids, listing (advanced but powerful)
 
 **Component methods (ECS-style).** A component can ship reusable methods in

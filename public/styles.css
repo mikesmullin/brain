@@ -1,5 +1,5 @@
 /* brain viz HUD — floating game-UI layer above the three.js world.
-   FPS histogram (top-right) owns a reserved corner: nothing may overlap it. */
+   Perf histograms (top-right: mjs-draws + fps) own a reserved corner. */
 html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; font-family: ui-sans-serif, system-ui, sans-serif; }
 #world { position: fixed; inset: 0; display: block; }
 .panel { background: rgba(16,17,22,.82); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.09); border-radius: 14px; color: #e8e8ec; }
@@ -187,8 +187,15 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
   box-shadow: 0 0 0 2px rgba(126, 226, 168, .35);
 }
 .hdr-right { display: inline-flex; align-items: center; gap: 8px; }
-/* FPS histogram — reserved top-right corner */
-#fps { position: fixed; top: 8px; right: 8px; width: 120px; height: 24px; z-index: 20; pointer-events: none; }
+/* Perf histograms — reserved top-right corner (mjs draws | fps) */
+#fps {
+  position: fixed; top: 8px; right: 8px; width: 120px; height: 24px;
+  z-index: 20; pointer-events: none;
+}
+#mjs-draws {
+  position: fixed; top: 8px; right: 136px; width: 120px; height: 24px;
+  z-index: 20; pointer-events: none;
+}
 #status { position: fixed; top: 44px; right: 8px; z-index: 9; font-size: 11px; color: #8d8d95; text-align: right; pointer-events: none; }
 /* right-docked collapsible sidebar — chat + inspector
    --sidebar-w is also set on :root so edge buttons stay aligned */
@@ -409,8 +416,14 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
   gap: 4px;
   align-items: center;
 }
-/* Citation chips = inspector-style entity pills (inline, one line, one cube) */
-.citation-pill {
+/*
+ * Shared entity pill — citations, inspector header slugs, relation targets.
+ * Click / Shift multi-select / dblclick frame: document handler on a[data-entity].
+ */
+a.entity-pill,
+.citation-pill,
+.insp-rel-pill,
+.insp-slug.entity-pill {
   display: inline-flex !important;
   align-items: center;
   gap: 0.28em;
@@ -424,24 +437,36 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
   text-decoration: none !important;
   line-height: 1.35;
   vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
 }
-.citation-pill:hover {
+a.entity-pill:hover,
+.citation-pill:hover,
+.insp-rel-pill:hover,
+.insp-slug.entity-pill:hover {
   background: rgba(120,160,255,.22) !important;
   border-color: rgba(120,160,255,.4);
 }
-.citation-pill .entity-link-icon {
+a.entity-pill .entity-link-icon,
+.citation-pill .entity-link-icon,
+.insp-rel-pill .entity-link-icon {
   font-size: 0.95em;
   flex-shrink: 0;
   top: 0;
   position: relative;
 }
-.citation-pill-label {
+a.entity-pill .entity-pill-label,
+.citation-pill-label,
+.insp-rel-pill-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 16em;
 }
-.citation-pill.is-selected {
+a.entity-pill.is-selected,
+.citation-pill.is-selected,
+.insp-rel-pill.is-selected,
+.insp-slug.entity-pill.is-selected {
   color: #b8f55a !important;
   background: rgba(184, 245, 90, .14) !important;
   border-color: rgba(184, 245, 90, .4);
@@ -701,6 +726,45 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
 }
 .allowlist-ta:focus { border-color: rgba(122,162,255,.5); color: #e8e8ec; }
 
+/* toolsEnabled wrench checklist */
+.tools-panel {
+  display: flex; flex-direction: column; gap: 6px;
+  border-radius: 8px; border: 1px solid rgba(255,255,255,.1);
+  background: rgba(0,0,0,.28); padding: 8px 10px; margin-bottom: 2px;
+}
+.tools-panel-hdr {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.tools-panel-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.tools-mini-btn {
+  appearance: none; border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06); color: #9a9aa5;
+  border-radius: 5px; padding: 2px 7px; font-size: 10px; cursor: pointer;
+}
+.tools-mini-btn:hover { color: #e8e8ec; border-color: rgba(122,162,255,.45); }
+.tools-panel-hint {
+  font-size: 9.5px; color: #6e6e78; line-height: 1.35;
+}
+.tools-checklist {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 180px; overflow-y: auto;
+}
+.tools-check-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 4px; border-radius: 5px; cursor: pointer;
+  font-size: 11px; color: #c8c8d0;
+}
+.tools-check-row:hover { background: rgba(255,255,255,.05); }
+.tools-check-row input {
+  accent-color: #7aa2ff; width: 13px; height: 13px; flex-shrink: 0; cursor: pointer;
+}
+.tools-check-name {
+  font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tools-empty, .tools-loading { font-size: 11px; color: #8d8d95; padding: 4px 2px; }
+.tools-error { font-size: 11px; color: #f07178; padding: 4px 2px; }
+
 /* ── Inspector (Unity-style) ───────────────────────────────── */
 #inspector {
   /* height set inline from store.inspHeight — fixed flex child so .insp-body
@@ -734,13 +798,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
 .insp-error { color: #ff9a9a; }
 .insp-status { color: #7ee2a8; }
 .insp-slugs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
-.insp-slug {
-  font-size: 10px; font-family: ui-monospace, Menlo, monospace;
-  color: #9ecbff; background: rgba(120,160,255,.12); border-radius: 4px;
-  padding: 1px 5px; text-decoration: none; max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* insp-slug is an entity-pill variant (shared styles above) */
+.insp-slug.entity-pill {
+  font-size: 10.5px;
+  font-family: ui-monospace, Menlo, monospace;
 }
-.insp-slug:hover { background: rgba(120,160,255,.22); }
 .insp-row {
   display: grid; grid-template-columns: minmax(80px, 38%) 1fr; gap: 6px;
   align-items: center; padding: 3px 0; min-height: 26px;
@@ -839,33 +901,13 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #050507; fon
   display: flex; flex-wrap: wrap; gap: 4px;
   padding: 2px 4px 6px 22px;
 }
-.insp-rel-pill {
-  display: inline-flex !important;
-  align-items: center;
-  gap: 0.25em;
-  max-width: 100%;
+/* Relation targets use shared entity-pill; slightly denser in the tree */
+.insp-rel-pill.entity-pill {
   font-size: 10.5px;
-  color: #9ecbff !important;
-  background: rgba(120,160,255,.12) !important;
-  border: 1px solid rgba(120,160,255,.22);
-  border-radius: 999px !important;
   padding: 1px 7px 1px 5px !important;
-  text-decoration: none !important;
-  line-height: 1.4;
 }
-.insp-rel-pill:hover {
-  background: rgba(120,160,255,.22) !important;
-  border-color: rgba(120,160,255,.4);
-}
-.insp-rel-pill .entity-link-icon { font-size: 0.9em; top: 0; }
-.insp-rel-pill-label {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.insp-rel-pill .entity-pill-label {
   max-width: 14em;
-}
-.insp-rel-pill.is-selected {
-  color: #b8f55a !important;
-  background: rgba(184, 245, 90, .14) !important;
-  border-color: rgba(184, 245, 90, .4);
 }
 .insp-rel-empty {
   font-size: 10px; color: #6a6a74; font-style: italic;
@@ -929,6 +971,30 @@ a.md-entity .entity-link-icon {
   color: inherit;
   position: relative;
   top: 0.08em; /* optical align with text */
+}
+/* Loading: exactly one of spinner vs cube (CSS, not x-show — avoids dual paint) */
+a.entity-link .entity-link-icon.entity-link-loading,
+a.md-entity .entity-link-icon.entity-link-loading {
+  display: none;
+  width: 0.85em;
+  height: 0.85em;
+  min-width: 0.85em;
+  min-height: 0.85em;
+  border-width: 1.5px;
+  top: 0.12em;
+  opacity: 0.85;
+  color: inherit;
+  flex: none;
+}
+a.entity-link.is-loading .entity-link-icon.entity-link-loading {
+  display: inline-block;
+}
+a.entity-link.is-loading .entity-link-icon.entity-link-icon-ready,
+a.entity-link.is-loading .entity-link-icon.ph-cube:not(.entity-link-loading) {
+  display: none !important;
+}
+a.entity-link.is-loading {
+  opacity: 0.92;
 }
 .hit.entity-link {
   display: block;

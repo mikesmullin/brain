@@ -2,16 +2,27 @@
 #
 # schema.yaml (plain YAML, one per storage dir, merged) shape:
 #   components: { <Component>: { fields: { <field>: <FieldDef> } } }
-#   classes:    { <Class>: { components: { <localAlias>: <Component> }, top: bool } }
+#   classes:    { <Class>: {
+#                   components: { <localAlias>: <Component> },
+#                   top?: bool,
+#                   idField?: "alias.field" | RELATION,   # slug/id source (see canonical.coffee)
+#                   displayField?: "alias.field",         # human label for UI anchors / labels API
+#                 } }
 #   relations:  { <REL>: { domain, range, cardinality, qualifiers: { <name>: <FieldDef> } } }
 #
 # FieldDef: { type, required?, list?, allowedTypes?[, values?] }
 #   type in: string | bool | int | date | enum | ref | json   (date = ISO 8601 datetime)
 #   allowedTypes: [Class] (ref constraint)   values: [str] (enum constraint)
+#
+# displayField — which component field is the entity's display name (UI chips, /labels,
+# search titles). Path form is the same as idField component paths: "alias.field"
+# (e.g. Address → info.address, Person → identity.name). Prefer this over heuristics.
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import yaml from 'js-yaml'
+import { getField } from './canonical.coffee'
+import { parseSlug } from './slug.coffee'
 
 export FIELD_TYPES = ['string', 'bool', 'int', 'date', 'enum', 'ref', 'json']
 export CARDINALITIES = ['oto', 'otn', 'nto', 'mtm']
@@ -56,6 +67,58 @@ export classFields = (schema, cls) ->
     for own field, fdef of (comp.fields or {})
       out["#{alias}.#{field}"] = { comp: compName, alias, field, def: fdef }
   out
+
+# Class display-name path ("alias.field"), or null when unset.
+export displayFieldOf = (schema, cls) ->
+  path = schema?.classes?[cls]?.displayField
+  return null unless path? and String(path).trim()
+  String(path).trim()
+
+# Map of Class -> displayField path for every class that declares one.
+export displayFieldMap = (schema) ->
+  out = {}
+  for own cls, cdef of (schema?.classes or {})
+    path = cdef?.displayField
+    out[cls] = String(path).trim() if path? and String(path).trim()
+  out
+
+# Resolve a scalar component path value to a trimmed string, or ''.
+_displayScalar = (v) ->
+  return '' unless v?
+  return '' if typeof v is 'object'
+  s = String(v).trim()
+  s
+
+# Human display name for an entity.
+# 1) schema displayField for the entity's class (authoritative when set)
+# 2) common name/title heuristics across component bags
+# 3) slug fallback
+export entityDisplayName = (schema, entity, slug = null) ->
+  s = slug or entity?.slug or ''
+  cls = entity?.cls
+  unless cls
+    try cls = parseSlug(s).cls catch then cls = null
+  comps = entity?.components or {}
+
+  path = if schema and cls then displayFieldOf(schema, cls) else null
+  if path
+    v = getField({ components: comps }, path)
+    t = _displayScalar(v)
+    return t if t
+
+  for key in ['info', 'meta', 'profile', 'identity', 'naming']
+    bag = comps[key]
+    continue unless bag and typeof bag is 'object'
+    for fname in ['name', 'title', 'label', 'display_name', 'full_name', 'address']
+      t = _displayScalar(bag[fname])
+      return t if t
+
+  for own _alias, fields of comps when fields and typeof fields is 'object'
+    for fname in ['name', 'title', 'label', 'display_name', 'full_name', 'address']
+      t = _displayScalar(fields[fname])
+      return t if t
+
+  s or entity?.slug or ''
 
 # A compact mermaid+yaml view of the schema graph (for `schema graph` / ontology).
 # When `counts` (class -> instance count) is given, names render as "Name (n)".

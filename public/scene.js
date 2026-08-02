@@ -161,7 +161,7 @@ export async function boot() {
     frameIdxs(union)
   }
   function frameUniverse() { flyTo(new THREE.Vector3(0, 0, 0), fitDist(meta.world_radius)) }
-  /** Frame only the given slugs (entity-link double-click — not F-style union). */
+  /** Frame only the given slugs (entity-pill double-click camera focus — selection unchanged). */
   async function frameSlugs(slugs) {
     const list = (Array.isArray(slugs) ? slugs : [slugs]).filter(Boolean)
     if (!list.length) return
@@ -428,9 +428,17 @@ export async function boot() {
   // scene existed — apply it now. No-op on HMR (selection already matches).
   if (store.routeSlugs?.length) applyEntitySelection(store.routeSlugs)
 
-  // ---------- FPS histogram (gl1-style) ----------
-  const fpsCtx = document.getElementById('fps').getContext('2d')
+  // ---------- FPS + m.js flush histograms (gl1-style) ----------
+  // #fps       = three.js frame time → fps
+  // #mjs-draws = m.js rAF flushes per display frame (Mithril-style ≤1 redraw/frame)
+  //              hover title also shows effects (binding re-runs) + full redraws
+  const fpsCtx = document.getElementById('fps')?.getContext('2d')
+  const mjsCtx = document.getElementById('mjs-draws')?.getContext('2d')
   const samples = new Float32Array(120); let sHead = 0
+  // flushes-per-frame samples (expect 0 or 1 when healthy)
+  const mjsSamples = new Float32Array(120); let mjsHead = 0
+  let lastEffects = 0
+  let lastRedraws = 0
   function coldHot(t) {
     t = Math.max(0, Math.min(1, t))
     let r, g, b
@@ -438,7 +446,16 @@ export async function boot() {
     else { const s = (t - 0.5) * 2; r = 0.95; g = 0.85 - 0.60 * s; b = 0.25 - 0.05 * s }
     return 'rgb(' + (r * 255 | 0) + ',' + (g * 255 | 0) + ',' + (b * 255 | 0) + ')'
   }
+  /** Magenta ramp for flush intensity (full height ≈ 2 flushes/frame = bad). */
+  function drawsHot(t) {
+    t = Math.max(0, Math.min(1, t))
+    const r = 0.45 + 0.55 * t
+    const g = 0.20 + 0.15 * (1 - t)
+    const b = 0.75 + 0.25 * t
+    return 'rgb(' + (r * 255 | 0) + ',' + (g * 255 | 0) + ',' + (b * 255 | 0) + ')'
+  }
   function drawFps(dtMs) {
+    if (!fpsCtx) return
     samples[sHead] = dtMs; sHead = (sHead + 1) % samples.length
     fpsCtx.clearRect(0, 0, 120, 24)
     for (let i = 0; i < samples.length; i++) {
@@ -457,6 +474,76 @@ export async function boot() {
       fpsCtx.fillText(Math.round(1000 / (sum / cnt)) + 'fps', 60, 12)
       fpsCtx.shadowBlur = 0
     }
+  }
+  /**
+   * Sample m.js rAF flushes since last display frame (expect ≤1).
+   * Y scale: full height = 2 flushes/frame (more than one pending slot = thrash).
+   */
+  function drawMjsDraws() {
+    if (!mjsCtx) return
+    let flushes = 0
+    let effects = 0
+    let redraws = 0
+    try {
+      const take =
+        (typeof M?.takePerfStats === 'function' && M.takePerfStats.bind(M)) ||
+        (typeof window !== 'undefined' &&
+          typeof window.M?.takePerfStats === 'function' &&
+          window.M.takePerfStats.bind(window.M)) ||
+        null
+      if (take) {
+        const s = take()
+        flushes = s.flushes || 0
+        effects = s.effects || 0
+        redraws = s.redraws || 0
+      } else if (typeof M?.takeDrawCalls === 'function') {
+        flushes = M.takeDrawCalls()
+      } else if (typeof window !== 'undefined' && typeof window.M?.takeDrawCalls === 'function') {
+        flushes = window.M.takeDrawCalls()
+      }
+    } catch {
+      flushes = 0
+    }
+    lastEffects = effects
+    lastRedraws = redraws
+    mjsSamples[mjsHead] = flushes
+    mjsHead = (mjsHead + 1) % mjsSamples.length
+    mjsCtx.clearRect(0, 0, 120, 24)
+    // Healthy: 0–1 flush/frame. Full bar height = 2 (double-schedule thrash).
+    const SCALE = 2
+    for (let i = 0; i < mjsSamples.length; i++) {
+      const v = mjsSamples[(mjsHead + i) % mjsSamples.length]
+      if (v <= 0) continue
+      const t = Math.min(1, v / SCALE)
+      const h = Math.max(1, 24 * t)
+      mjsCtx.fillStyle = drawsHot(t)
+      mjsCtx.fillRect(i, 24 - h, 1, h)
+    }
+    let sum = 0, cnt = 0, peak = 0
+    for (const v of mjsSamples) {
+      if (v > 0) { sum += v; cnt++ }
+      if (v > peak) peak = v
+    }
+    const avg = cnt ? sum / cnt : 0
+    mjsCtx.fillStyle = '#fff'
+    mjsCtx.font = '11px ui-sans-serif'
+    mjsCtx.textAlign = 'center'
+    mjsCtx.textBaseline = 'middle'
+    mjsCtx.shadowColor = 'rgba(0,0,0,.8)'
+    mjsCtx.shadowBlur = 3
+    // "1f" = rAF flushes this sample window average (whole number)
+    const label = Math.round(avg) + 'f'
+    mjsCtx.fillText(label, 60, 12)
+    mjsCtx.shadowBlur = 0
+    try {
+      const el = document.getElementById('mjs-draws')
+      if (el) {
+        el.title =
+          `m.js flushes/frame (last=${flushes}, avg=${avg.toFixed(2)}, peak=${peak}) · ` +
+          `effects=${effects} redraws=${redraws} · ` +
+          'flushes = rAF paint slots (Mithril-style ≤1/frame); effects = binding re-runs inside'
+      }
+    } catch { /* ignore */ }
   }
 
   // ---------- main loop ----------
@@ -547,6 +634,7 @@ export async function boot() {
     applyRig()
     renderer.render(scene, camera)
     drawFps(dt * 1000)
+    drawMjsDraws() // sample m.js refresh count for this display frame
     raf = requestAnimationFrame(frame)
   }
   raf = requestAnimationFrame(frame)

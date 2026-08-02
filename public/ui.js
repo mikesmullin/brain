@@ -18,11 +18,24 @@ import { marked } from 'marked'
 import { registerChatStore } from '/chat/store.js'
 import { hydrateEntityLinks, labelRows } from '/entity-labels.js'
 import {
+  initEntityModel,
+  acquire,
+  release,
+  ensureMany,
+  get as getEntity,
+  peekLabel,
+  refresh as refreshEntity,
+  applyServerChange,
+  subscribe as subscribeEntities,
+} from '/entity-model.js'
+import {
   attachMentionEditor,
   promoteEntityRefsInMarkdown,
   renderPlainWithMentions,
   setEditorText,
 } from '/mentions.js'
+
+const INSP_HOLDER = 'insp'
 
 const PLACEHOLDER = {
   search: 'search your brain…',
@@ -50,7 +63,7 @@ const mdRenderer = {
     if (slug) {
       const safe = slug.replace(/"/g, '&quot;')
       const path = Router.href('/e/' + encodeURIComponent(slug))
-      return `<a class="md-entity entity-link" data-entity="${safe}" href="${path}" title="${safe}"><i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>${text}</a>`
+      return `<a class="entity-pill md-entity entity-link" data-entity="${safe}" href="${path}" title="${safe}"><i class="ph ph-cube entity-link-icon entity-link-icon-ready" aria-hidden="true"></i><span class="entity-pill-label">${text}</span></a>`
     }
     const t = title ? ` title="${String(title).replace(/"/g, '&quot;')}"` : ''
     return `<a href="${h.replace(/"/g, '&quot;')}"${t} target="_blank" rel="noopener noreferrer">${text}</a>`
@@ -110,6 +123,41 @@ function stripMarkdownForSpeech(src) {
     .replace(/\n{3,}/g, '\n\n')
     .replace(/[ \t]{2,}/g, ' ')
     .trim()
+}
+
+/**
+ * Shared entity chip (SERPS citations, inspector header slugs, relation targets).
+ * Same markup + classes everywhere so one document-level `a[data-entity]`
+ * handler owns click / Shift multi-select / dblclick frame for all of them.
+ *
+ * @param {string} slugExpr m.js expression → slug string (e.g. `t.slug`, `s`, `r.slug`)
+ * @param {{
+ *   xFor?: string,
+ *   keyExpr?: string,
+ *   labelExpr?: string,
+ *   xShow?: string,
+ *   extraClass?: string,
+ * }} [opts]
+ * @returns {string}
+ */
+function entityPillHtml(slugExpr, opts = {}) {
+  const labelExpr = opts.labelExpr || `$store.viz.entityLabel(${slugExpr})`
+  const extra = opts.extraClass ? ` ${opts.extraClass}` : ''
+  const xFor = opts.xFor ? ` x-for="${opts.xFor}"` : ''
+  const key = opts.keyExpr ? ` :key="${opts.keyExpr}"` : ''
+  const xShow = opts.xShow ? ` x-show="${opts.xShow}"` : ''
+  return `<a class="entity-pill entity-link${extra}"${xFor}${key}${xShow}
+     :class="{
+       'is-selected': $store.viz.isSlugSelected(${slugExpr}),
+       'is-loading': $store.viz.entityLabelLoading(${slugExpr}),
+     }"
+     :data-entity="${slugExpr}" data-label-bound="1"
+     :href="$store.viz.entityHref(${slugExpr})"
+     :title="${slugExpr}">
+    <span class="entity-link-icon entity-link-loading spin" aria-hidden="true"></span>
+    <i class="ph ph-cube entity-link-icon entity-link-icon-ready" aria-hidden="true"></i>
+    <span class="entity-pill-label" x-text="${labelExpr}"></span>
+  </a>`
 }
 
 const TEMPLATE = `
@@ -172,15 +220,16 @@ const TEMPLATE = `
         <div class="answer error" x-show="$store.viz.error" x-text="$store.viz.error"></div>
         <a x-for="r in $store.viz.rows" :key="r.slug || r.title"
            :class="'hit'
-             + (r.kind === 'node' ? ' entity-link' : '')
+             + (r.kind === 'node' ? ' entity-link entity-pill' : '')
              + (r.kind === 'node' && $store.viz.isSlugSelected(r.slug) ? ' is-selected' : '')"
            :href="r.kind === 'node' ? $store.viz.entityHref(r.slug) : null"
            :data-entity="r.kind === 'node' ? r.slug : null"
+           :data-label-bound="r.kind === 'node' ? '1' : null"
            :title="r.kind === 'node' ? r.slug : null"
            @click="r.kind !== 'node' && $store.viz.openRow(r)">
           <div class="hit-line">
-            <i class="ph ph-cube entity-link-icon" x-show="r.kind === 'node'" aria-hidden="true"></i>
-            <div class="slug" x-text="r.title"></div>
+            <i class="ph ph-cube entity-link-icon entity-link-icon-ready" x-show="r.kind === 'node'" aria-hidden="true"></i>
+            <div class="slug entity-pill-label" x-text="r.title"></div>
           </div>
           <div class="meta" x-show="r.sub" x-text="r.sub"></div>
         </a>
@@ -266,20 +315,17 @@ const TEMPLATE = `
         <div class="answer warn" x-show="$store.viz.speakWarning">🔇 please install
           <a href="https://github.com/mikesmullin/ada" target="_blank" rel="noopener">ada</a>
           to hear results spoken aloud</div>
-        <!-- Citation chips from think·ontology (inline entity links, not SERPS rows) -->
+        <!-- Citation chips — same entity-pill as inspector / relation targets -->
         <div class="query-hits" x-show="$store.viz.isLlmMode() && $store.viz.rows.length">
           <div class="hits-label">citations</div>
           <div class="query-hits-list">
-            <a x-for="r in $store.viz.rows" :key="'c-' + (r.slug || r.title)"
-               x-show="r.kind === 'node'"
-               class="citation-pill entity-link"
-               :class="{ 'is-selected': $store.viz.isSlugSelected(r.slug) }"
-               :href="$store.viz.entityHref(r.slug)"
-               :data-entity="r.slug"
-               :title="r.slug">
-              <i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>
-              <span class="citation-pill-label" x-text="r.title"></span>
-            </a>
+            ${entityPillHtml('r.slug', {
+              xFor: 'r in $store.viz.rows',
+              keyExpr: "'c-' + (r.slug || r.title)",
+              xShow: "r.kind === 'node'",
+              labelExpr: 'r.title || $store.viz.entityLabel(r.slug)',
+              extraClass: 'citation-pill',
+            })}
           </div>
         </div>
 
@@ -385,6 +431,40 @@ const TEMPLATE = `
                       @blur="$store.chat.onAllowlistBlur()"
                       spellcheck="false"></textarea>
           </div>
+          <div class="tools-panel" x-show="$store.chat.toolsPanelOpen">
+            <div class="tools-panel-hdr">
+              <label class="allowlist-label">
+                tools for inference
+                <span class="allowlist-source"
+                      x-text="$store.chat.toolsEnabledOverridden ? '· ui override' : '· agent default'"></span>
+              </label>
+              <div class="tools-panel-actions">
+                <button type="button" class="tools-mini-btn"
+                        @click="$store.chat.enableAllTools()" title="Enable all">all</button>
+                <button type="button" class="tools-mini-btn"
+                        @click="$store.chat.disableAllTools()" title="Disable all">none</button>
+                <button type="button" class="tools-mini-btn"
+                        @click="$store.chat.resetToolsEnabled()" title="Reset to agent default">reset</button>
+              </div>
+            </div>
+            <div class="tools-panel-hint">
+              Unchecked tools are removed from the model (not registered). Distinct from allowlist (auto-approve).
+            </div>
+            <div class="tools-checklist" x-show="!$store.chat.toolsCatalogLoading">
+              <label class="tools-check-row" x-for="t in $store.chat.toolsCatalog" :key="t.name">
+                <input type="checkbox"
+                       :checked="$store.chat.isToolEnabled(t.name)"
+                       @change="$store.chat.setToolEnabled(t.name, $event.target.checked)" />
+                <span class="tools-check-name" x-text="t.name" :title="t.description || t.name"></span>
+              </label>
+              <div class="tools-empty" x-show="!$store.chat.toolsCatalog.length && !$store.chat.toolsCatalogError">
+                No tools registered for this agent.
+              </div>
+              <div class="tools-error" x-show="$store.chat.toolsCatalogError"
+                   x-text="$store.chat.toolsCatalogError"></div>
+            </div>
+            <div class="tools-loading" x-show="$store.chat.toolsCatalogLoading">Loading tools…</div>
+          </div>
           <div class="draft-ta mention-editor mention-editor-multi" id="viz-chat-draft"
                contenteditable="true" role="textbox" spellcheck="true"
                data-empty="1"
@@ -421,6 +501,12 @@ const TEMPLATE = `
                     @click="$store.chat.stop()" title="Stop agent">
               <i class="ph-fill ph-stop" aria-hidden="true"></i>
             </button>
+            <button type="button" class="icon-btn tools-toggle"
+                    :class="{ active: $store.chat.toolsPanelOpen }"
+                    @click="$store.chat.toggleToolsPanel()"
+                    :title="'Tools for inference' + ($store.chat.toolsEnabledOverridden ? ' (ui override)' : '')">
+              <i class="ph ph-wrench" aria-hidden="true"></i>
+            </button>
             <button type="button" class="icon-btn allowlist-toggle"
                     :class="{ active: $store.chat.allowlistOpen }"
                     @click="$store.chat.toggleAllowlist()" title="Allowlist">
@@ -452,12 +538,11 @@ const TEMPLATE = `
         <div class="insp-loading" x-show="$store.viz.insp.loading">Loading…</div>
         <div class="insp-error" x-show="$store.viz.insp.error" x-text="$store.viz.insp.error"></div>
         <div class="insp-slugs" x-show="$store.viz.insp.slugs.length">
-          <a class="insp-slug entity-link" x-for="s in $store.viz.insp.slugs" :key="s"
-             :class="{ 'is-selected': $store.viz.isSlugSelected(s) }"
-             :data-entity="s" :href="$store.viz.entityHref(s)" :title="s">
-            <i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>
-            <span x-text="$store.viz.entityLabel(s)"></span>
-          </a>
+          ${entityPillHtml('s', {
+            xFor: 's in $store.viz.insp.slugs',
+            keyExpr: 's',
+            extraClass: 'insp-slug',
+          })}
         </div>
         <div class="insp-row" x-for="f in $store.viz.insp.fields" :key="f.key">
           <label class="insp-key" :title="f.key" x-text="f.key"></label>
@@ -495,14 +580,11 @@ const TEMPLATE = `
                 <span class="insp-rel-key" x-text="r.key"></span>
               </button>
               <div class="insp-rel-targets" x-show="r.open">
-                <a class="insp-rel-pill entity-link" x-for="t in r.targets" :key="t.slug"
-                   :class="{ 'is-selected': $store.viz.isSlugSelected(t.slug) }"
-                   :data-entity="t.slug"
-                   :href="$store.viz.entityHref(t.slug)"
-                   :title="t.slug">
-                  <i class="ph ph-cube entity-link-icon" aria-hidden="true"></i>
-                  <span class="insp-rel-pill-label" x-text="$store.viz.entityLabel(t.slug)"></span>
-                </a>
+                ${entityPillHtml('t.slug', {
+                  xFor: 't in r.targets',
+                  keyExpr: 't.slug',
+                  extraClass: 'insp-rel-pill',
+                })}
                 <div class="insp-rel-empty" x-show="!r.targets.length">none</div>
               </div>
             </div>
@@ -517,7 +599,7 @@ const TEMPLATE = `
     <i :class="'ph ' + ($store.viz.is3d ? 'ph-square' : 'ph-cube')"></i>
     <span x-text="$store.viz.is3d ? '2D' : '3D'"></span>
   </div>
-  <div id="hint" class="panel">WASD fly · E/Q up/down · MMB orbit · hold Space: pan · wheel dolly · click select (white) · Shift multi-select · entity link: click toggle · dblclick frame that entity · search hits (yellow) · Esc clear · F frame · Home zoom out</div>
+  <div id="hint" class="panel">WASD fly · E/Q up/down · MMB orbit · hold Space: pan · wheel dolly · click select (white) · Shift multi-select · entity pill: click select · Shift+click multi · dblclick frame without changing selection · search hits (yellow) · Esc clear · F frame · Home zoom out</div>
 </div>
 `
 
@@ -702,6 +784,9 @@ export async function boot() {
   // query mode, so a newcomer's first question gets the best possible answer
   const mode = PLACEHOLDER[saved.mode] ? saved.mode : 'ontology'
 
+  // SPA entity model (cache + refcount) — before chat/viz so both can read it
+  initEntityModel()
+
   // Chat store (angela multi-session) — must exist before mount so $store.chat binds
   const chatStore = registerChatStore()
   chatStore.init?.()
@@ -721,7 +806,7 @@ export async function boot() {
     _labelTick: 0,   // bumped when entity name cache fills → re-paint x-text labels
     routeSlugs: [],   // entity slugs parsed from the current /e/… route
     skipZoomOnce: false,   // one-shot: next route apply selects without flying
-    frameAfterSelectOnce: false, // one-shot: frame after apply (entity-link dblclick)
+    frameAfterSelectOnce: false, // one-shot: frame survivors after single-click select
     // Sidebar layout (px) — persisted; CSS vars keep edge-buttons aligned
     sidebarWidth: clampSidebarW(saved.sidebarWidth),
     inspHeight: clampInspH(saved.inspHeight),
@@ -832,40 +917,155 @@ export async function boot() {
       return false
     },
 
-    /** Cached display name for a slug (falls back to slug until /labels resolves). */
+    /**
+     * Resolved display name (or slug if unknown). Kicks off one-shot prefetch.
+     * Depend ONLY on _labelTick — not entityStore().rev (that re-runs hundreds
+     * of pill effects per upsert and hits m.js's effect-run cap).
+     */
     entityLabel(slug) {
-      // Depend on _labelTick so x-text re-runs when the cache is filled.
       void this._labelTick
       if (!slug) return ''
-      try {
-        const c = window.__ENTITY_LABEL_CACHE__
-        if (c && c.has(slug)) return c.get(slug)
-      } catch { /* ignore */ }
-      // Kick off a resolve if missing — hydrate will re-paint anchors; for
-      // x-text bindings we also schedule a soft refresh when the cache fills.
+      // peekLabel — no rev subscribe (avoid N pills × every upsert)
+      const name = peekLabel(slug)
+      if (name && name !== slug) return name
+      // Unknown / still the slug — one-shot resolve
       void this.prefetchEntityLabel(slug)
-      return slug
+      return name || slug
+    },
+
+    /**
+     * True while a label fetch is in flight (or not yet attempted) for a slug
+     * that still displays as the raw Class/id. Used for pill spinners.
+     */
+    entityLabelLoading(slug) {
+      void this._labelTick
+      if (!slug) return false
+      const name = peekLabel(slug)
+      if (name && name !== slug) return false
+      this._labelPrefetch = this._labelPrefetch || new Set()
+      this._labelTried = this._labelTried || new Set()
+      // In-flight always shows spinner
+      if (this._labelPrefetch.has(slug)) return true
+      // Not tried yet — will be kicked by entityLabel; treat as loading
+      if (!this._labelTried.has(slug)) return true
+      return false
     },
 
     async prefetchEntityLabel(slug) {
       if (!slug) return
+      this._labelPrefetch = this._labelPrefetch || new Set()
+      this._labelTried = this._labelTried || new Set()
+      if (this._labelPrefetch.has(slug) || this._labelTried.has(slug)) return
+      // Already have a human name in store/cache
+      const existing = peekLabel(slug)
+      if (existing && existing !== slug) {
+        this._labelTried.add(slug)
+        return
+      }
+      this._labelPrefetch.add(slug)
+      this._labelTick = (this._labelTick || 0) + 1 // paint spinner
       try {
         const { resolveLabel } = await import('/entity-labels.js')
-        const name = await resolveLabel(slug)
-        // Touch a reactive counter so x-text bindings re-read entityLabel()
-        if (name && name !== slug) {
-          this._labelTick = (this._labelTick || 0) + 1
+        await resolveLabel(slug)
+        this._labelTried.add(slug)
+      } catch {
+        this._labelTried.add(slug)
+      } finally {
+        this._labelPrefetch?.delete?.(slug)
+        // Always tick so pills drop spinner / pick up name (or stay on slug)
+        this._labelTick = (this._labelTick || 0) + 1
+      }
+    },
+
+    /**
+     * Batch-resolve labels for many slugs (relation expand). One WS round-trip
+     * instead of N× one-slug.
+     * @param {string[]} slugs
+     */
+    async prefetchEntityLabels(slugs) {
+      const list = [...new Set((slugs || []).filter(Boolean))]
+      if (!list.length) return
+      this._labelPrefetch = this._labelPrefetch || new Set()
+      this._labelTried = this._labelTried || new Set()
+      const need = list.filter((s) => {
+        const n = peekLabel(s)
+        if (n && n !== s) {
+          this._labelTried.add(s)
+          return false
         }
-      } catch { /* ignore */ }
+        if (this._labelTried.has(s) || this._labelPrefetch.has(s)) return false
+        return true
+      })
+      if (!need.length) {
+        this._labelTick = (this._labelTick || 0) + 1
+        return
+      }
+      for (const s of need) this._labelPrefetch.add(s)
+      this._labelTick = (this._labelTick || 0) + 1
+      try {
+        const { ensureLabels } = await import('/entity-model.js')
+        await ensureLabels(need)
+      } catch {
+        /* ignore */
+      } finally {
+        for (const s of need) {
+          this._labelPrefetch.delete(s)
+          this._labelTried.add(s)
+        }
+        this._labelTick = (this._labelTick || 0) + 1
+      }
+    },
+
+    /**
+     * Rebuild inspector fields/relations from entity-model cache (no network).
+     * Called when the model upserts a slug currently shown in the inspector.
+     * Does NOT hydrate DOM links or setLabel — that path loops back into the model.
+     */
+    rebuildInspectorFromModel() {
+      const list = (this.insp?.slugs || []).filter(Boolean)
+      if (!list.length) return
+      // Do not read entityStore().rev — would subscribe this path to every upsert
+      const entities = list
+        .map((s) => getEntity(s))
+        .filter((e) => e && !e.error && !e.deleted && !e.loading)
+      if (!entities.length) return
+      const fields = aggregateFields(entities)
+      const prevOpen = new Set(
+        (this.insp.relations || []).filter((g) => g.open).map((g) => g.key),
+      )
+      // Cap relation targets so a hub node doesn't spawn thousands of x-for effects
+      const REL_TARGET_CAP = 48
+      const relations = aggregateRelations(entities).map((g) => ({
+        ...g,
+        targets: g.targets.slice(0, REL_TARGET_CAP),
+        open: prevOpen.has(g.key),
+      }))
+      const sig = entities
+        .map((e) => `${e.slug}:${e.fetchedAt || 0}:${e.label || ''}`)
+        .join('|')
+      if (sig === this._inspModelSig) return
+      this._inspModelSig = sig
+      // Single bag replace = fewer intermediate reactive triggers than 4 sets
+      this.detailSlug = list.join(', ')
+      this.insp = {
+        ...this.insp,
+        entities,
+        fields,
+        relations,
+        loading: false,
+        error: this.insp.error || '',
+        slugs: list.slice(),
+      }
     },
 
     /**
      * Tag every a[data-entity] in the DOM with .is-selected when its slug is
      * in the selection set. Needed for markdown-rendered links (static HTML)
-     * that can't use reactive :class; safe to call after any selection change
-     * or after new chat/SERPS content is painted.
+     * that can't use reactive :class.
+     * @param {{ hydrate?: boolean }} [opts] hydrate=true also resolves link labels
+     *   (default false — hydration is owned by refreshEntityLabels to avoid loops)
      */
-    syncEntityLinkSelection() {
+    syncEntityLinkSelection(opts = {}) {
       const set = new Set([
         ...(this.selectedSlugs || []),
         ...(this.routeSlugs || []),
@@ -880,8 +1080,7 @@ export async function boot() {
             slugs.length > 0 && slugs.every((s) => set.has(s)),
           )
         })
-        // Resolve human names for any new entity links (name as text, slug as title)
-        void hydrateEntityLinks(document)
+        if (opts.hydrate) void hydrateEntityLinks(document)
       }
       // Next frame so m.js x-for / x-html paint first
       if (typeof requestAnimationFrame === 'function') {
@@ -891,11 +1090,21 @@ export async function boot() {
       }
     },
 
-    /** Hydrate entity-link labels after content paint (SERPS / chat / inspector). */
+    /**
+     * Hydrate entity-link labels after content paint (SERPS / chat).
+     * Selection classes only — does not re-enter sync→hydrate→sync.
+     */
     async refreshEntityLabels() {
-      await new Promise((r) => requestAnimationFrame(() => r()))
-      await hydrateEntityLinks(document)
-      this.syncEntityLinkSelection?.()
+      if (this._refreshLabelsBusy) return
+      this._refreshLabelsBusy = true
+      try {
+        await new Promise((r) => requestAnimationFrame(() => r()))
+        await hydrateEntityLinks(document)
+        // Class-only pass (no nested hydrate)
+        this.syncEntityLinkSelection?.({ hydrate: false })
+      } finally {
+        this._refreshLabelsBusy = false
+      }
     },
 
     /** Wipe non-LLM SERPS (and shared one-shot result fields). */
@@ -1089,8 +1298,8 @@ export async function boot() {
     // of the current selection (Shift+click on links / canvas). Pushes a history
     // entry; the route-change handler applies it to the scene.
     // Camera fly-to is controlled by noZoom:
-    //   - canvas click + entity-link single-click → noZoom (select in place)
-    //   - entity-link double-click → select then frameSelection()
+    //   - canvas click + entity-pill single-click → noZoom (select in place)
+    //   - entity-pill double-click → frame only (frameEntityOnly; selection unchanged)
     //   - deep links / back-forward → zoom (skipZoomOnce left false)
     openEntities(slugs, additive = false, { noZoom = false } = {}) {
       let list = Array.isArray(slugs) ? slugs.slice() : [slugs]
@@ -1151,23 +1360,23 @@ export async function boot() {
     },
 
     /**
-     * Entity-link double-click: select *only* these slugs (replace multi-select)
-     * then frame zoom onto them alone — not the prior multi-set, and not yellow
-     * search highlights (unlike F / frameSelection).
+     * Frame-zoom onto these slugs WITHOUT changing the selection set.
+     * Used by entity-pill double-click (markdown, mentions, relations, citations).
+     * @param {string|string[]} slugs
      */
-    openEntitiesAndFrame(slugs) {
+    frameEntityOnly(slugs) {
       const list = (Array.isArray(slugs) ? slugs : [slugs]).filter(Boolean)
       if (!list.length) return
-      this.frameAfterSelectOnce = true
-      // Always replace selection with the double-clicked entity/entities only
-      this.openEntities(list, false, { noZoom: true })
-      // If route/selection unchanged, apply may no-op before framing — frame
-      // these slugs directly (not frameSelection, which unions highlights).
-      requestAnimationFrame(() => {
-        if (!this.frameAfterSelectOnce) return // already consumed by apply
-        this.frameAfterSelectOnce = false
-        try { void this.api.frameSlugs?.(list) } catch { /* scene not ready */ }
-      })
+      try {
+        void this.api.frameSlugs?.(list)
+      } catch { /* scene not ready */ }
+    },
+
+    /**
+     * @deprecated use frameEntityOnly — double-click must not replace selection
+     */
+    openEntitiesAndFrame(slugs) {
+      this.frameEntityOnly(slugs)
     },
 
     openRow(r) {   // path rows only — node rows render as entity links
@@ -1209,73 +1418,55 @@ export async function boot() {
       if (!r) return
       r.open = !r.open
       if (r.open && r.targets?.length) {
-        for (const t of r.targets) {
-          if (t?.slug) void this.prefetchEntityLabel(t.slug)
-        }
-        // Lime selection + human names on newly painted pills
+        // One batched /labels WS call for the whole group (not N× one-slug)
+        void this.prefetchEntityLabels(r.targets.map((t) => t?.slug).filter(Boolean))
+        // Lime selection classes on newly painted pills
         this.syncEntityLinkSelection?.()
       }
     },
 
     /**
-     * Flatten components into alias.field rows; multi-select aggregates
-     * shared values or shows mixed (`-`).
+     * Open inspector for slugs: acquire entity-model refs, fetch via model,
+     * render fields from the store (Unity-style multi-edit aggregates).
      * @param {string[]} slugs
      */
     async loadInspector(slugs) {
       const list = (slugs || []).filter(Boolean)
+      // Release previous inspector holds
+      for (const s of this.insp?.slugs || []) {
+        release(s, INSP_HOLDER)
+      }
       if (!list.length) {
         this.insp = { loading: false, error: '', status: '', slugs: [], entities: [], fields: [], relations: [] }
         this.detailSlug = ''
         return
       }
+      for (const s of list) acquire(s, INSP_HOLDER)
       this.insp.loading = true
       this.insp.error = ''
       this.insp.status = ''
+      this.insp.slugs = list.slice()
       this.collapsed = false
       try {
-        const res = await (await fetch(
-          '/nodes?slugs=' + list.map(encodeURIComponent).join(','),
-        )).json()
-        if (res.error) throw new Error(res.error)
-        const entities = (res.entities || []).filter((e) => e && !e.error)
-        this.insp.entities = entities
-        this.insp.slugs = entities.map((e) => e.slug)
-        this.detailSlug = entities.map((e) => e.slug).join(', ')
-        this.insp.fields = aggregateFields(entities)
-        // Keep expand/collapse state for relation groups that still exist
-        // (clicking a pill reloads the inspector; without this the tree snaps shut)
-        const prevOpen = new Set(
-          (this.insp.relations || []).filter((g) => g.open).map((g) => g.key),
-        )
-        this.insp.relations = aggregateRelations(entities).map((g) => ({
-          ...g,
-          open: prevOpen.has(g.key),
-        }))
-        // Warm labels for relation targets (so expand is instant)
-        for (const g of this.insp.relations) {
-          for (const t of g.targets.slice(0, 24)) {
-            if (t.slug) void this.prefetchEntityLabel(t.slug)
-          }
+        await ensureMany(list, { force: false })
+        const entities = list
+          .map((s) => getEntity(s))
+          .filter((e) => e && !e.error && !e.deleted)
+        if (!entities.length) {
+          const firstErr = list.map((s) => getEntity(s)).find((e) => e?.error)
+          throw new Error(firstErr?.error || 'no entities')
         }
-        // Warm label cache from already-fetched entities (info.name etc.)
-        try {
-          const cache = (window.__ENTITY_LABEL_CACHE__ ??= new Map())
-          for (const e of entities) {
-            if (!e?.slug) continue
-            const n =
-              e.components?.info?.name ||
-              e.components?.meta?.name ||
-              e.components?.info?.title
-            if (n && String(n).trim()) cache.set(e.slug, String(n).trim())
-          }
-          this._labelTick = (this._labelTick || 0) + 1
-        } catch { /* ignore */ }
-        void this.refreshEntityLabels?.()
+        // Single rebuild path (sets _inspModelSig so subscriber no-ops)
+        this._inspModelSig = ''
+        this.rebuildInspectorFromModel()
+        this.insp.loading = false
+        // Light label tick for slug pills — not full DOM hydrate
+        this._labelTick = (this._labelTick || 0) + 1
       } catch (err) {
         this.insp.error = err.message || String(err)
         this.insp.fields = []
         this.insp.relations = []
+        this.insp.loading = false
       } finally {
         this.insp.loading = false
       }
@@ -1337,11 +1528,11 @@ export async function boot() {
           const err = (res.results || []).find((r) => !r.ok)
           throw new Error(err?.error || res.error || 'save failed')
         }
-        // Update local field state (no longer mixed; new shared value)
-        f.mixed = false
-        f.value = val
-        f.display = formatFieldDisplay(val)
-        f.kind = classifyValue(val)
+        // Refresh entity-model for edited slugs (single source of truth)
+        await Promise.all(
+          (this.insp.slugs || []).map((s) => refreshEntity(s, { force: true })),
+        )
+        this.rebuildInspectorFromModel()
         this.insp.status = 'saved'
         setTimeout(() => { if (this.insp.status === 'saved') this.insp.status = '' }, 1200)
       } catch (err) {
@@ -1613,17 +1804,16 @@ export async function boot() {
   Router.register('/', 'brain viz', () => ({ template: '' }))
   Router.register('/e/:slugs', 'brain viz', () => ({ template: '' }))
 
-  // Delegated entity-link adapter: any <a data-entity="slug[,slug]"> in the
-  // document (markdown chips, SERPS, inspector, @-mention composer chips).
-  //   single click     → after LINK_CLICK_MS: select / toggle OFF, then frame survivors
-  //   double-click     → select *that entity only* + frame zoom onto it alone
-  //   Shift+click      → multi-select toggle + frame survivors (debounced vs dblclick)
-  //   Ctrl/Cmd+click   → real browser nav (new tab) via the permalink href
+  // Delegated entity-pill adapter: ONE path for every a[data-entity] / .entity-pill
+  // (markdown anchors, mention composer chips, relation pills, citations, SERPS).
+  //   single click     → after LINK_CLICK_MS: select / toggle (selection changes)
+  //   double-click     → within LINK_CLICK_MS: cancel pending select, frame-zoom
+  //                      that entity ONLY — selection set is NOT modified
+  //   Shift+click      → multi-select toggle (add/remove)
+  //   Ctrl/Cmd+click   → browser new-tab via permalink
   //
-  // Debounce: hold selection toggle until LINK_CLICK_MS. A second click inside
-  // that window cancels the toggle and frames the link's entity alone (we do
-  // not rely solely on the browser `dblclick` event, which is easy to miss).
-  const LINK_CLICK_MS = 350
+  // Capture phase so inspector / contenteditable cannot swallow the gesture.
+  const LINK_CLICK_MS = 300
   /** @type {{ timer: ReturnType<typeof setTimeout>, slugs: string[], shiftKey: boolean } | null} */
   let pendingLinkClick = null
   const clearPendingLinkClick = () => {
@@ -1636,25 +1826,63 @@ export async function boot() {
     window.__ENTITY_LINK_PENDING__ = null
   }
 
+  /** @param {Element|null|undefined} el */
+  const entityLinkFromEvent = (el) => {
+    if (!el?.closest) return null
+    return (
+      el.closest('a[data-entity]') ||
+      el.closest('a.entity-pill') ||
+      el.closest('a.entity-link[href*="/e/"]') ||
+      el.closest('a.md-entity[href*="/e/"]')
+    )
+  }
+
+  /** @param {HTMLAnchorElement} a */
+  const slugsFromEntityLink = (a) => {
+    const raw =
+      a.getAttribute('data-entity') ||
+      a.dataset?.entity ||
+      ''
+    if (raw) return String(raw).split(',').map((s) => s.trim()).filter(Boolean)
+    // Fallback: parse /e/slug1,slug2 from href
+    try {
+      const href = a.getAttribute('href') || ''
+      const m = href.match(/\/e\/([^?#]+)/)
+      if (m) {
+        return decodeURIComponent(m[1])
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      }
+    } catch { /* ignore */ }
+    return []
+  }
+
+  /**
+   * Double-click / second click within LINK_CLICK_MS:
+   * camera frames the pill's entity — does NOT change selection.
+   * @param {string[]} slugs
+   */
   const frameEntityLink = (slugs) => {
     clearPendingLinkClick()
     window.__ENTITY_LINK_PENDING__ = null
-    // Sole selection + frame that entity only (not multi-set, not F-style union)
-    M.store('viz').openEntitiesAndFrame(slugs)
+    M.store('viz').frameEntityOnly(slugs)
   }
 
   const onEntityLink = (e) => {
-    if (e.defaultPrevented || e.button !== 0) return
+    if (e.button !== 0) return
     // Ctrl/Cmd → open permalink in new tab (don't steal the browser gesture)
     if (e.ctrlKey || e.metaKey) return
-    const a = e.target.closest?.('a[data-entity]')
+    const a = /** @type {HTMLAnchorElement|null} */ (entityLinkFromEvent(/** @type {Element} */ (e.target)))
     if (!a) return
+    const slugs = slugsFromEntityLink(a)
+    if (!slugs.length) return
     e.preventDefault()
     e.stopPropagation()
-    const slugs = a.dataset.entity.split(',').filter(Boolean)
-    const shiftKey = e.shiftKey
+    const shiftKey = !!e.shiftKey
 
-    // Second click within the debounce window → double-click: frame this entity
+    // Second click within the debounce window → double-click: frame only
+    // (cancel pending single-click select so selection stays put)
     if (pendingLinkClick) {
       frameEntityLink(slugs)
       return
@@ -1668,6 +1896,7 @@ export async function boot() {
         pendingLinkClick = null
         window.__ENTITY_LINK_PENDING__ = null
         if (!job) return
+        // Single-click: may change selection (plain / shift toggle)
         M.store('viz').selectEntityLink(job.slugs, {
           shiftKey: job.shiftKey,
           noZoom: true,
@@ -1677,24 +1906,92 @@ export async function boot() {
     window.__ENTITY_LINK_PENDING__ = pendingLinkClick
   }
   const onEntityLinkDbl = (e) => {
-    if (e.defaultPrevented || e.button !== 0) return
+    if (e.button !== 0) return
     if (e.ctrlKey || e.metaKey) return
-    const a = e.target.closest?.('a[data-entity]')
+    const a = /** @type {HTMLAnchorElement|null} */ (entityLinkFromEvent(/** @type {Element} */ (e.target)))
     if (!a) return
+    const slugs = slugsFromEntityLink(a)
+    if (!slugs.length) return
     e.preventDefault()
     e.stopPropagation()
-    // Idempotent with the second-click path above
-    const slugs = a.dataset.entity.split(',').filter(Boolean)
+    // Browser dblclick event: same as second-click path (frame, no select)
     frameEntityLink(slugs)
   }
-  if (window.__ENTITY_LINK__) document.removeEventListener('click', window.__ENTITY_LINK__)
-  if (window.__ENTITY_LINK_DBL__) document.removeEventListener('dblclick', window.__ENTITY_LINK_DBL__)
+  // Remove prior listeners (HMR) — both bubble and capture registrations
+  if (window.__ENTITY_LINK__) {
+    document.removeEventListener('click', window.__ENTITY_LINK__, true)
+    document.removeEventListener('click', window.__ENTITY_LINK__, false)
+  }
+  if (window.__ENTITY_LINK_DBL__) {
+    document.removeEventListener('dblclick', window.__ENTITY_LINK_DBL__, true)
+    document.removeEventListener('dblclick', window.__ENTITY_LINK_DBL__, false)
+  }
   window.__ENTITY_LINK__ = onEntityLink
   window.__ENTITY_LINK_DBL__ = onEntityLinkDbl
-  document.addEventListener('click', onEntityLink)
-  document.addEventListener('dblclick', onEntityLinkDbl)
+  // Capture: runs before sidebar/inspector handlers; shift-click multi-select
+  // works on relation pills, citations, markdown chips, SERPS, composer chips.
+  document.addEventListener('click', onEntityLink, true)
+  document.addEventListener('dblclick', onEntityLinkDbl, true)
 
   M.mount('#app', () => ({ template: TEMPLATE }))
+
+  // Entity-model → views: when a cached entity changes, rebuild inspector if
+  // that slug is open, and refresh link labels.
+  if (window.__ENTITY_MODEL_UNSUB__) {
+    try {
+      window.__ENTITY_MODEL_UNSUB__()
+    } catch { /* ignore */ }
+  }
+  // Debounced view sync — NEVER call refreshEntityLabels on 'label' (that
+  // re-enters hydrate→setLabel→notify→hydrate and melts the tab).
+  let _entityViewSyncTimer = null
+  /** @type {Set<string>} */
+  const _entityViewPending = new Set()
+  /** @type {Set<string>} */
+  const _entityViewReasons = new Set()
+  window.__ENTITY_MODEL_UNSUB__ = subscribeEntities((slug, _rec, reason) => {
+    try {
+      const r = reason || 'upsert'
+      // Ignore pure label writes from hydrate — rev bump already refreshes x-text
+      if (r === 'label' || r === 'evict' || r === 'loading') {
+        if (r === 'label') {
+          const viz = M.store('viz')
+          if (viz) viz._labelTick = (viz._labelTick || 0) + 1
+        }
+        return
+      }
+      if (slug) _entityViewPending.add(slug)
+      else _entityViewPending.add('*')
+      _entityViewReasons.add(r)
+      if (_entityViewSyncTimer != null) return
+      _entityViewSyncTimer = setTimeout(() => {
+        _entityViewSyncTimer = null
+        const pending = [..._entityViewPending]
+        const reasons = [..._entityViewReasons]
+        _entityViewPending.clear()
+        _entityViewReasons.clear()
+        try {
+          const viz = M.store('viz')
+          if (!viz) return
+          const inspSlugs = viz.insp?.slugs || []
+          const hitInsp =
+            pending.includes('*') ||
+            pending.some((s) => inspSlugs.includes(s))
+          if (hitInsp) viz.rebuildInspectorFromModel?.()
+          // DOM hydrate only for body/server changes — not every upsert
+          const needHydrate = reasons.some((x) =>
+            x === 'server' || x === 'delete' || x === 'fetch' || x === 'fetchMany',
+          )
+          if (needHydrate) void viz.refreshEntityLabels?.()
+          else viz._labelTick = (viz._labelTick || 0) + 1
+        } catch (err) {
+          console.warn('[entity-model] view sync failed', err)
+        }
+      }, 32) // ~2 frames — coalesce storms
+    } catch (err) {
+      console.warn('[entity-model] view sync failed', err)
+    }
+  })
 
   // ---- @-mention composers (search + chat) ----
   const hrefFor = (slug) => Router.href('/e/' + encodeURIComponent(slug))
