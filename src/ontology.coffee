@@ -5,7 +5,7 @@
 # whole-world scan); the model only decides where to look.
 import Agent from 'agl-ai'
 import { hybridSearch } from './search.coffee'
-import { thinkPrefix, buildPromptEntityContext } from './think.coffee'
+import { augmentSystemPrompt, buildPromptEntityContext } from './think.coffee'
 
 # Longest practical wall-clock stamp for the system prompt: full weekday, month
 # name, day, year, 12h time with seconds + ms, long timezone name, plus ISO-8601
@@ -31,14 +31,13 @@ export formatSystemTime = (d = new Date()) ->
 # and entCtx are fresh. Do not bake this into agent coffee / setDefaultAgent.
 #
 # opts:
-#   model, thinking  — thinkPrefix for lm-studio
 #   entCtx           — preloaded <selected-entities> / <referenced-entities> YAML
 #   freeform         — true for Angela multi-turn chat (omit final_answer requirement);
 #                      false/omit for ontologyQuery (requires final_answer tool)
+# Think / reasoning_effort are applied by Angela.augmentSystemPrompt (or Agent
+# factory) — do not bake `<|think|>` into this template.
 # Tool inventories are not listed here — the model already sees registered tools.
 export buildOntologySystemPrompt = (opts = {}) ->
-  model = opts.model
-  thinking = opts.thinking
   entCtx = opts.entCtx or ''
   freeform = opts.freeform is true
   # Only difference freeform vs ontology: whether final_answer is mandatory.
@@ -48,14 +47,14 @@ You must reply using the `final_answer` tool; I will not accept other replies.
 """
 
   """
-#{thinkPrefix(model, thinking)}
 You're a research assistant.
 You help me (a researcher) to (answer relational questions) by (traversing a typed knowledge graph).
 I (the human operator) am interacting with you via (the ontology browser app).
 
+You will be provided with ontology data as part of your system prompt and the user prompts, 
+(this is pre-resolved for your convenience by the system, whenever the user makes references to entities),
+But for any entities or relationships that you don't have,
 Use your tools to navigate the ontology data to learn more about entities and their relationships.
-When the system prompt already includes <selected-entities> or <referenced-entities>,
-use those bodies first — do not re-fetch them unless you need fresher or related data.
 
 ## How to reply
 
@@ -64,6 +63,8 @@ IMPORTANT: Always refer to an entity by its slug (this will cause the app UI to 
   - `[[Class/id|display text]]`
   - `[[REL:Class/id]]`
   - `[[REL:Class/id|display text]]`
+
+Unless I ask you to go into detail, please keep your answer brief and friendly (≤2 sentences).
 
 If I refer to context you don't have, then ask me clarifying questions.
 
@@ -93,12 +94,12 @@ export ontologyQuery = (core, question, opts = {}) ->
   entCtx = await buildPromptEntityContext core,
     selection: opts.selection
     question: question
-  # Lazy: system prompt assembled immediately before Agent.factory
-  system = buildOntologySystemPrompt
+  # Lazy: base system prompt, then Angela think/effort augmentation
+  effort = opts.reasoning_effort or opts.reasoningEffort or 'medium'
+  system = augmentSystemPrompt buildOntologySystemPrompt(entCtx: entCtx, freeform: false),
     model: model
     thinking: opts.thinking
-    entCtx: entCtx
-    freeform: false
+    reasoning_effort: effort
 
   agent = await Agent.factory
     model: model
@@ -106,7 +107,7 @@ export ontologyQuery = (core, question, opts = {}) ->
     retries: 0     # never auto-retry: cancel must stick (see think.coffee)
     system_prompt: system
     parallel_tools: true
-    reasoning_effort: 'medium'
+    reasoning_effort: effort
     output_tool:
       name: 'final_answer'
       description: 'Report the final answer with the resolved entity slugs.'

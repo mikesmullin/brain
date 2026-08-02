@@ -2,7 +2,7 @@
  * Chat store for brain viz — multi-tab angela sessions (cowork-compatible API).
  * Survives HMR via M.store('chat').
  */
-import M from '/vendor/m-js/src/m.js';
+import M from 'https://mikesmullin.github.io/m-js/dist/m.min.js';
 import { marked } from 'marked';
 import {
   extractWikiSlugs,
@@ -141,6 +141,14 @@ export function registerChatStore() {
     historyOpen: false,
     activeSessionId: null,
     projectRoot: '',
+    /**
+     * Reasoning effort for AGL / providers: low|medium|high|xhigh|max.
+     * Also drives Gemma-4 depth phrases when thinking is on (Angela harness).
+     */
+    reasoningEffort: 'medium',
+
+    reasoningEffortOptions: ['low', 'medium', 'high', 'xhigh', 'max'],
+
     /** Last model chosen in the composer dropdown (localStorage-backed). */
     preferredModel: '',
     stickToBottom: true,
@@ -180,6 +188,7 @@ export function registerChatStore() {
       }
       // Restore last model pick before any newTab / search seed
       this.loadPreferredModel();
+      this.loadReasoningEffort();
       if (!this._bootstrapped) {
         this._bootstrapped = true;
         if (typeof fetch === 'function') void this.bootstrap();
@@ -194,6 +203,31 @@ export function registerChatStore() {
       const raw = readUiPrefs();
       // Prefer dedicated chatModel; fall back to legacy viz.model
       this.preferredModel = String(raw.chatModel || raw.model || '').trim();
+    },
+
+    loadReasoningEffort() {
+      const raw = readUiPrefs();
+      const e = String(raw.reasoningEffort || 'medium').toLowerCase();
+      this.reasoningEffort = this.reasoningEffortOptions.includes(e)
+        ? e
+        : 'medium';
+    },
+
+    saveReasoningEffort(level) {
+      const e = String(level || 'medium').toLowerCase();
+      this.reasoningEffort = this.reasoningEffortOptions.includes(e)
+        ? e
+        : 'medium';
+      writeUiPrefs({ reasoningEffort: this.reasoningEffort });
+      try {
+        M.store('viz')?.persist?.();
+      } catch {
+        /* ignore */
+      }
+    },
+
+    onEffortChange(ev) {
+      this.saveReasoningEffort(ev?.target?.value);
     },
 
     /**
@@ -540,6 +574,12 @@ export function registerChatStore() {
         const model = this.activeTab?.model;
         this.fillSelect(document.getElementById('viz-chat-agent'), agents, agent);
         this.fillSelect(document.getElementById('viz-chat-model'), models, model);
+        // Reasoning effort dropdown (static options; keep selection)
+        const effortEl = document.getElementById('viz-chat-effort');
+        if (effortEl) {
+          const cur = this.reasoningEffort || 'medium';
+          if (effortEl.value !== cur) effortEl.value = cur;
+        }
       });
     },
 
@@ -1426,9 +1466,12 @@ export function registerChatStore() {
           ]);
           if (sel) body.selectionContext = sel;
           if (ref) body.referencedContext = ref;
+          // Gemma-4 think token + effort phrase (Angela); effort also → AGL providers
+          if (viz?.thinking) body.thinking = true;
         } catch {
           /* context preload is best-effort */
         }
+        body.reasoning_effort = this.reasoningEffort || 'medium';
 
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -1514,6 +1557,7 @@ export function registerChatStore() {
         const j = await r.json();
         this.history = j.sessions || [];
         if (j.projectRoot) this.projectRoot = j.projectRoot;
+        this.streamTick = (this.streamTick || 0) + 1;
       } catch {
         /* ignore */
       }
@@ -1622,6 +1666,7 @@ export function registerChatStore() {
           }
         }
         await this.refreshHistory();
+        this.streamTick = (this.streamTick || 0) + 1;
         syncDraftEditor(this);
       } catch (err) {
         console.error('[chat] deleteSession failed', err);
@@ -1633,13 +1678,37 @@ export function registerChatStore() {
         return;
       }
       try {
-        await fetch('/api/sessions', { method: 'DELETE' });
+        const res = await fetch('/api/sessions', { method: 'DELETE' });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => res.statusText);
+          throw new Error(errText || `HTTP ${res.status}`);
+        }
         sessionCache.clear();
-        this.history = [];
         this.activeSessionId = null;
+        // Reset open tabs (messages + session link) — same idea as deleteSession
         for (const t of this.tabs || []) {
           t.sessionId = null;
+          t.messages = [];
+          t.isNew = true;
+          t.waiting = false;
+          t.name = `Chat ${t.id}`;
+          try {
+            t._chatAbort?.abort();
+          } catch {
+            /* ignore */
+          }
         }
+        // Sync list from server (should be empty), then force history UI repaint
+        await this.refreshHistory();
+        if (!Array.isArray(this.history)) this.history = [];
+        if (this.history.length) {
+          // Belt-and-suspenders if list endpoint lagged behind clean
+          this.history.splice(0, this.history.length);
+        }
+        this.history = [];
+        this.streamTick = (this.streamTick || 0) + 1;
+        syncDraftEditor(this);
+        this.scheduleScrollBottom?.();
       } catch (err) {
         console.error('[chat] cleanAllSessions failed', err);
       }

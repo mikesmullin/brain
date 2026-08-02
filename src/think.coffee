@@ -5,6 +5,16 @@ import Agent from 'agl-ai'
 import { hybridSearch } from './search.coffee'
 import { renderEntityText } from './index.coffee'
 import { serializeEntity } from './storage.coffee'
+# Think / reasoning-effort augmentation lives in Angela (Gemma 4 `<|think|>` +
+# depth phrases; AGL reasoning_effort for other providers).
+import {
+  augmentSystemPrompt as _augmentSystemPrompt
+  isGemma4Model
+  normalizeReasoningEffort
+  REASONING_LEVELS
+} from 'angela/think'
+
+export { isGemma4Model, normalizeReasoningEffort, REASONING_LEVELS }
 
 SYSTEM = """
 You synthesize an answer about a knowledge graph using ONLY the retrieved context.
@@ -22,11 +32,18 @@ Rules:
 - Keep `answer` concise and directly responsive to the question.
 """
 
-# `<|think|>` prefix enables reasoning on lm-studio models (off by default —
-# performance-first). Only injected for that provider; other providers ignore
-# or would mis-handle the token, so it's gated on the model spec's prefix.
+# Back-compat: think token prefix only (no depth phrase). Prefer augmentSystemPrompt.
 export thinkPrefix = (model, thinking) ->
-  if thinking and String(model or '').startsWith('lm-studio:') then '<|think|>\n' else ''
+  return '' unless thinking
+  return '' unless isGemma4Model(model)
+  '<|think|>\n'
+
+# Full system-prompt augmentation (Gemma 4 think + effort phrase when applicable).
+export augmentSystemPrompt = (system, opts = {}) ->
+  _augmentSystemPrompt system,
+    model: opts.model
+    think: opts.thinking ? opts.think
+    reasoning_effort: opts.reasoning_effort ? opts.reasoningEffort
 
 # ── Entity context blocks for system prompts (think / ontology / chat) ────
 # Two lists:
@@ -170,6 +187,7 @@ export think = (core, question, opts = {}) ->
     selection: opts.selection
     question: question
   throw new Error('cancelled by user') if opts.isCancelled?()
+  effort = opts.reasoning_effort or opts.reasoningEffort or 'medium'
   agent = await Agent.factory
     model: model
     # stream: cancellation only works promptly over SSE — LM Studio ignores a
@@ -180,7 +198,8 @@ export think = (core, question, opts = {}) ->
     # 0 retries: a cancelled/stuck inference must not re-fire (default AGL is 5).
     # Honored centrally by withProviderRetry for every provider.
     retries: 0
-    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + entCtx
+    system_prompt: augmentSystemPrompt(SYSTEM + entCtx, { model, thinking: opts.thinking, reasoning_effort: effort })
+    reasoning_effort: effort
     output_tool:
       name: 'answer'
       description: 'Report the synthesized, grounded answer with citations and gaps.'

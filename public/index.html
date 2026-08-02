@@ -30,7 +30,8 @@
 <canvas id="fps" width="120" height="24" title="three.js render FPS"></canvas>
 <div id="app"></div>
 <script type="module">
-  import '/vendor/m-js/src/hot-client.js'
+  // m.js from CDN (always current); local hmr-client only for /__m_hmr
+  import '/hmr-client.js'
   window.__M_BOOT__ = async (t = 0) => {
     const app = await import('/app.js?t=' + t)
     await app.boot(t)

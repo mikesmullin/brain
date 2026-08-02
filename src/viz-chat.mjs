@@ -161,15 +161,26 @@ export function buildBrainChatSystemPrompt(opts = {}) {
  * Safe before first run (updates create config) or after (mutates agent).
  *
  * @param {import('angela').Angela} harness
- * @param {{ model?: string|null, thinking?: boolean, entCtx?: string }} [opts]
+ * @param {{
+ *   model?: string|null,
+ *   thinking?: boolean,
+ *   reasoning_effort?: string|null,
+ *   entCtx?: string,
+ * }} [opts]
  */
 export function applyBrainSystemPrompt(harness, opts = {}) {
   if (!harness) return;
+  // Base ontology prompt (no <|think|>) — Angela applies think/effort augmentation.
   const system = buildBrainChatSystemPrompt(opts);
+  if (typeof harness.setThink === 'function') {
+    harness.setThink(Boolean(opts.thinking));
+  }
+  if (typeof harness.setReasoningEffort === 'function') {
+    harness.setReasoningEffort(opts.reasoning_effort ?? opts.reasoningEffort ?? 'medium');
+  }
   if (typeof harness.setSystemPrompt === 'function') {
     harness.setSystemPrompt(system);
   } else if (harness.session) {
-    // Fallback: poke live agent if any
     for (const id of harness.session.list?.() || []) {
       const s = harness.session.get?.(id);
       if (s?.agent) s.agent.system_prompt = system;
@@ -1224,10 +1235,13 @@ export function createChatApi(opts) {
           }
           const entCtx = entCtxParts.join('\n');
 
-          // Lazy system prompt (ontology.coffee) — right before Agent.factory / run
+          // Lazy system prompt (ontology.coffee) — right before Agent.factory / run.
+          // think + reasoning_effort are applied by Angela harness augmentation.
           applyBrainSystemPrompt(entry.harness, {
             model: entry.model,
             thinking: Boolean(body.thinking),
+            reasoning_effort:
+              body.reasoning_effort || body.reasoningEffort || 'medium',
             entCtx,
           });
 

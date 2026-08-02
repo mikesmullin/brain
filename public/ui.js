@@ -13,7 +13,7 @@
 // document-level handler (below) adapts all of them onto the same path.
 // Shift+click on entity links toggles multi-select (Ctrl/Cmd+click keeps the
 // browser “open in new tab” behavior via the real /e/… permalink).
-import M, { Router } from '/vendor/m-js/src/index.js'
+import M, { Router } from 'https://mikesmullin.github.io/m-js/dist/m.min.js'
 import { marked } from 'marked'
 import { registerChatStore } from '/chat/store.js'
 import { hydrateEntityLinks, labelRows } from '/entity-labels.js'
@@ -278,16 +278,20 @@ const TEMPLATE = `
             <span>History</span>
             <button type="button" class="icon-btn trash-all"
                     title="Delete all sessions"
-                    x-show="$store.chat.historyList.length"
+                    x-show="($store.chat.streamTick, $store.chat.history.length)"
                     @click="$store.chat.cleanAllSessions()">
               <i class="ph ph-trash" aria-hidden="true"></i>
             </button>
           </div>
           <div class="chat-history-list">
-            <div class="chat-history-empty" x-show="!$store.chat.historyList.length">
+            <!-- streamTick forces repaint after cleanAllSessions / deleteSession -->
+            <div class="chat-history-empty"
+                 x-show="!($store.chat.streamTick, $store.chat.history.length)">
               No sessions yet
             </div>
-            <div class="chat-history-row" x-for="item in $store.chat.historyList" :key="item.id"
+            <div class="chat-history-row"
+                 x-for="item in ($store.chat.streamTick, $store.chat.history)"
+                 :key="item.id"
                  :class="{ active: item.id === $store.chat.activeSessionId }">
               <button type="button" class="chat-history-item"
                       :title="item.title || item.agent || item.id"
@@ -478,10 +482,20 @@ const TEMPLATE = `
                     @change="$store.chat.onModelChange($event)"
                     :disabled="$store.chat.activeWaiting || !$store.chat.modelOptions.length"
                     title="Model"></select>
+            <select class="dd effort-dd" id="viz-chat-effort"
+                    @change="$store.chat.onEffortChange($event)"
+                    :disabled="$store.chat.activeWaiting"
+                    title="Reasoning effort (provider effort; Gemma 4 also uses depth phrases)">
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
             <button type="button" id="think-toggle" class="icon-btn"
                     x-show="$store.viz.canThink()"
                     :class="{ on: $store.viz.thinking }"
-                    :title="$store.viz.thinking ? 'Disable thinking' : 'Enable thinking'"
+                    :title="$store.viz.thinking ? 'Disable Gemma 4 think token' : 'Enable Gemma 4 think token (<|think|>)'"
                     @click="$store.viz.toggleThinking()"><i class="ph-bold ph-brain"></i></button>
             <button type="button" id="sel-toggle" class="icon-btn"
                     :class="{ on: $store.viz.useSelection }"
@@ -640,6 +654,21 @@ const RUN = (window.__VIZ_RUN__ ??= { ac: null, qid: null, timer: null, done: nu
 
 function fmtElapsed(t0) {
   return ((performance.now() - t0) / 1000).toFixed(3) + 's'
+}
+
+/** Unique Class/id refs from [[wiki-links]] in assistant text (for SERP highlights). */
+function wikiSlugsFromText(text) {
+  const out = []
+  const seen = new Set()
+  const re = /\[\[(?:[A-Z][A-Z0-9_]*:)?([A-Za-z][\w]*\/[^\]|#]+)(?:[|#][^\]]*)?\]\]/g
+  let m
+  while ((m = re.exec(String(text || '')))) {
+    const slug = m[1].trim()
+    if (!slug || seen.has(slug) || !SLUG_RE.test(slug)) continue
+    seen.add(slug)
+    out.push(slug)
+  }
+  return out
 }
 
 function startTimer(store, t0) {
@@ -822,17 +851,15 @@ export async function boot() {
 
     placeholder() { return PLACEHOLDER[this.mode] },
 
-    // Thinking is only offered for models matching *:gemma* — the only ones
-    // that understand the <|think|> prefix token (see thinkPrefix, think.coffee).
-    // The '' spec is judged by what it resolves to (aglDefault).
-    // Prefer the chat-composer model (searchbar model picker was removed).
+    // Thinking toggle (Gemma 4 only): injects <|think|> + effort phrase via Angela.
+    // Pattern *:gemma4 / gemma-4 — see angela/think isGemma4Model.
     canThink() {
       let m = this.model || this.aglDefault
       try {
         const cm = M.store('chat')?.activeTab?.model
         if (cm) m = cm
       } catch { /* chat not ready */ }
-      return /:.*gemma/i.test(m || '')
+      return /gemma[-_]?4/i.test(m || '')
     },
 
     /** Active chat model, falling back to persisted viz.model / agl default. */
@@ -1225,6 +1252,9 @@ export async function boot() {
           ...prev,
           mode: this.mode, strategy: this.strategy, expand: this.expand,
           model: this.model, thinking: this.thinking, useSelection: this.useSelection,
+          reasoningEffort: (() => {
+            try { return M.store('chat')?.reasoningEffort || 'medium' } catch { return 'medium' }
+          })(),
           speak: this.speak, qByMode: this.qByMode,
           sidebarWidth: this.sidebarWidth,
           inspHeight: this.inspHeight,
@@ -1555,6 +1585,8 @@ export async function boot() {
           await fetch('/cancel?qid=' + encodeURIComponent(qid || ''))
         } catch { /* network blip — still abort local */ }
       }
+      // think/ontology from the search bar run through chat NDJSON — abort that too
+      try { await M.store('chat')?.stop?.() } catch { /* ignore */ }
       try { RUN.ac?.abort() } catch { /* ignore */ }
       if (RUN.done) {
         try { await RUN.done } catch { /* ignore */ }
@@ -1594,8 +1626,8 @@ export async function boot() {
         RUN.ac = new AbortController()
         // Capture qid in a local — never re-read RUN.qid for the request URL
         // (concurrent stop/adopt must not change the id mid-flight).
-        qid = mode === 'think' || mode === 'ontology'
-          ? Date.now().toString(36) + Math.random().toString(36).slice(2) : null
+        // One-shot /think|/ontology RPC still uses qid; chat-stream path does not.
+        qid = null
         RUN.qid = qid
         RUN.done = new Promise((r) => { settle = r })
         RUN.settle = settle
@@ -1603,20 +1635,18 @@ export async function boot() {
         this.title = mode === 'think' || mode === 'ontology' ? 'thinking…' : 'searching…'
         this.error = ''; this.answer = ''; this.json = ''; this.rows = []; this.speakWarning = false
         this.collapsed = false
-        // Open a chat session immediately (with the query as the user bubble)
-        // so the chat pane + stopwatch appear before the network/LLM returns.
-        // seedFromQuery later appends the assistant answer into this tab.
-        if (mode === 'search' || mode === 'think' || mode === 'ontology') {
+        // Hybrid search: open a chat tab with the query (no LLM stream).
+        // think/ontology use chat.send() below — live NDJSON (tools + tokens).
+        if (mode === 'search') {
           try {
             const chat = M.store('chat')
             if (chat) {
               chat.newTab()
               const t = chat.activeTab
               if (t) {
-                t.name = q.slice(0, 24) || (mode === 'search' ? 'Search' : mode)
+                t.name = q.slice(0, 24) || 'Search'
                 t.isNew = false
-                // Search is quick; think/ontology run until seedFromQuery freezes the watch
-                t.waiting = mode === 'think' || mode === 'ontology' || mode === 'search'
+                t.waiting = true
                 t.messages.push({
                   id: crypto.randomUUID(),
                   kind: 'user',
@@ -1626,7 +1656,6 @@ export async function boot() {
                   eventId: null,
                   goto: { enabled: false, label: '' },
                 })
-                // Chat header stopwatch (shared with composer sends)
                 chat.startStopwatch()
               }
             }
@@ -1652,39 +1681,45 @@ export async function boot() {
           }))
           void labelRows(this.rows).then(() => this.refreshEntityLabels?.())
         } else if (mode === 'think' || mode === 'ontology') {
-          // POST JSON (not GET): avoids browser auto-retry of "idempotent" GETs
-          // after a dropped connection, which re-fired the same qid.
-          // sel is sent whenever the toggle is on — even empty.
-          const selSlugs = this.routeSlugs.length ? this.routeSlugs : this.selectedSlugs
-          const body = {
-            q,
-            qid,
-            model: this.effectiveModel() || this.model,
-            think: this.thinking,
+          // Live multi-turn chat stream (same path as the composer): tools,
+          // reasoning, and token deltas via /api/chat NDJSON — not the one-shot
+          // /think|/ontology RPC that only dumped a final answer into the pane.
+          const chat = M.store('chat')
+          if (!chat) throw new Error('chat store not ready')
+          chat.newTab()
+          const t = chat.activeTab
+          if (t) {
+            t.model = this.effectiveModel() || this.model || t.model
+            t.name = q.slice(0, 24) || mode
           }
-          if (this.useSelection) body.sel = selSlugs.join(',')
-          const res = await (await fetch('/' + mode, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-            signal,
-          })).json()
+          // chat.send owns waiting/stopwatch; abort via viz.stop() → chat.stop()
+          await chat.send(q)
           if (gen !== RUN.gen) return
-          if (res.error) throw new Error(res.error)
+          // Final assistant text for answer panel + SERP highlights from wiki-links
+          const asst = [...(chat.activeTab?.messages || [])]
+            .reverse()
+            .find((m) => m.kind === 'assistant' && m.text && !m.streaming)
+          this.answer = (asst?.text || '').trim() || '(no answer)'
           finish(mode)
-          this.answer = res.answer || '(no answer)'
-          // Seed multi-turn chat (also speaks when voice is on — single path)
-          try {
-            M.store('chat')?.seedFromQuery?.({
-              question: q,
-              answer: this.answer,
-              mode,
-            })
-          } catch { /* chat store not ready */ }
-          const nodes = (res.citation_nodes || res.entity_nodes || []).filter((x) => x.slug)
-          this.api.setHighlights(nodes.filter((x) => x.i >= 0).map((x) => x.i))
-          this.rows = nodes.map((x) => ({ kind: 'node', i: x.i, slug: x.slug, title: x.slug, sub: '' }))
-          void labelRows(this.rows).then(() => this.refreshEntityLabels?.())
+          const slugs = wikiSlugsFromText(this.answer)
+          if (slugs.length) {
+            const resolved = await Promise.all(
+              slugs.slice(0, 40).map(async (slug) => {
+                try {
+                  const r = await (await fetch('/resolve?slug=' + encodeURIComponent(slug))).json()
+                  return { slug, i: r.i ?? -1 }
+                } catch {
+                  return { slug, i: -1 }
+                }
+              }),
+            )
+            if (gen !== RUN.gen) return
+            this.api.setHighlights(resolved.filter((x) => x.i >= 0).map((x) => x.i))
+            this.rows = resolved.map((x) => ({
+              kind: 'node', i: x.i, slug: x.slug, title: x.slug, sub: '',
+            }))
+            void labelRows(this.rows).then(() => this.refreshEntityLabels?.())
+          }
         } else if (mode === 'graph') {
           const res = await (await fetch('/graph?pattern=' + encodeURIComponent(q), { signal })).json()
           if (gen !== RUN.gen) return

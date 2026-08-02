@@ -5,7 +5,7 @@
 //   - each boot disposes the previous scene (listeners, RAF, GL resources)
 // so editing this file hot-swaps behavior without losing your place in space.
 import * as THREE from 'three'
-import M from '/vendor/m-js/src/index.js'
+import M from 'https://mikesmullin.github.io/m-js/dist/m.min.js'
 
 export async function boot() {
   if (window.__VIZ_SCENE__) window.__VIZ_SCENE__.dispose()

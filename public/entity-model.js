@@ -12,7 +12,7 @@
  * `rev` bumps. They should acquire(slug, holder) while visible and
  * release(slug, holder) when gone.
  */
-import M from '/vendor/m-js/src/index.js'
+import M from 'https://mikesmullin.github.io/m-js/dist/m.min.js'
 import { wsFetchNodes, wsFetchLabels, ensureEntityWs } from '/entity-ws.js'
 
 /** @typedef {{
