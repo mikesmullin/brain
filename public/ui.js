@@ -599,7 +599,7 @@ const TEMPLATE = `
     <i :class="'ph ' + ($store.viz.is3d ? 'ph-square' : 'ph-cube')"></i>
     <span x-text="$store.viz.is3d ? '2D' : '3D'"></span>
   </div>
-  <div id="hint" class="panel">WASD fly · E/Q up/down · MMB orbit · hold Space: pan · wheel dolly · click select (white) · Shift multi-select · entity pill: click select · Shift+click multi · dblclick frame without changing selection · search hits (yellow) · Esc clear · F frame · Home zoom out</div>
+  <div id="hint" class="panel">WASD fly · E/Q up/down · MMB orbit · Space pan · wheel dolly · click/Shift select · pill click/Shift · dblclick frame · Esc clear · F frame · Home out</div>
 </div>
 `
 

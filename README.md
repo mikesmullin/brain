@@ -40,6 +40,10 @@ traversal, grounded LLM synthesis, a real-time WebGL explorer of the whole graph
 typed tool surface for AI agents over [MCP](https://modelcontextprotocol.io) — all local, no
 external services, your data never leaves the machine.
 
+<p align="center">
+  <img src="docs/screenshots/viz-panama.png" alt="Brain viz — Panama Papers knowledge graph" />
+</p>
+
 ## Quick start
 
 Run a CLI query:
