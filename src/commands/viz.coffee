@@ -18,6 +18,9 @@ import { paths, loadConfig } from '../config.coffee'
 import { parseArgs } from '../args.coffee'
 import { serverRunning } from '../server.coffee'
 import { request, noServerError } from '../client.coffee'
+import { createChatApi } from '../viz-chat.mjs'
+import { serializeEntity } from '../storage.coffee'
+import { parseSlug } from '../slug.coffee'
 
 MIME =
   '.html': 'text/html; charset=utf-8'
@@ -97,7 +100,47 @@ export run = (argv, cwd = process.cwd()) ->
       idx = slugIndex.get(r.slug)
       Object.assign({}, r, { i: (idx ? -1) })
 
+  # Deterministic display name for entity links (prefer info.name / meta.name /
+  # any component `.name` / `.title`; fall back to the slug).
+  entityDisplayName = (entity, slug) ->
+    comps = entity?.components or {}
+    for key in ['info', 'meta', 'profile', 'identity']
+      n = comps[key]?.name
+      return String(n).trim() if n? and String(n).trim()
+      t = comps[key]?.title
+      return String(t).trim() if t? and String(t).trim()
+    for own _alias, fields of comps when fields and typeof fields is 'object'
+      for fname in ['name', 'title', 'label', 'display_name', 'full_name']
+        v = fields[fname]
+        return String(v).trim() if v? and typeof v isnt 'object' and String(v).trim()
+    slug or entity?.slug or ''
+
+  # YAML (or JSON fallback) body for <entity> blocks in LLM context.
+  formatEntityYaml = (out) ->
+    try
+      s = parseSlug(out.slug)
+      return serializeEntity({
+        slug: s.slug, cls: s.cls, id: s.id
+        components: out.components or {}
+        relations: out.relations or {}
+        body: out.body or ''
+      }).trimEnd()
+    catch
+      JSON.stringify({
+        components: out.components or {}
+        relations: out.relations or {}
+        body: out.body or ''
+        incoming: out.incoming
+      }, null, 2)
+
   json = (obj) -> new Response(JSON.stringify(obj), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+
+  # angela multi-session chat (cowork-compatible /api/* surface).
+  # Agents + session logs live under the active brain db/ so the DB admin
+  # owns .angela/ next to entities (paths(cwd).root), not the process CWD.
+  dbRoot = paths(cwd).root
+  chatApi = createChatApi({ projectRoot: dbRoot, brainCwd: cwd })
+  console.log "brain viz: angela project root #{chatApi.projectRoot} (db/.angela/agents)"
 
   # static files from public/ (traversal-guarded, no-store so HMR always wins)
   serveStatic = (pathname) ->
@@ -109,6 +152,23 @@ export run = (argv, cwd = process.cwd()) ->
     new Response Bun.file(abs), { headers: { 'content-type': MIME[extname(abs).toLowerCase()] or 'application/octet-stream', 'cache-control': 'no-store' } }
 
   hmrClients = new Set()
+
+  # Recursively list public/ files for HMR (chat/*.js etc.).
+  listPublicFiles = (dir, base = '') ->
+    out = []
+    try
+      for f in readdirSync(dir)
+        continue if f is 'vendor' or f is 'node_modules'
+        abs = join(dir, f)
+        rel = if base then "#{base}/#{f}" else f
+        try st = statSync(abs) catch then continue
+        if st.isDirectory()
+          out = out.concat(listPublicFiles(abs, rel))
+        else if /\.(html|js|mjs|css|json)$/.test(f)
+          out.push(rel)
+    catch
+      # ignore
+    out
 
   srv = Bun.serve
     port: port
@@ -124,6 +184,10 @@ export run = (argv, cwd = process.cwd()) ->
         return undefined if server.upgrade(req)
         return new Response('WebSocket upgrade failed', { status: 400 })
       try
+        # angela chat API (sessions, stream, approve, …)
+        if url.pathname.startsWith('/api/')
+          return await chatApi.handle(req)
+
         switch url.pathname
           when '/meta.json' then new Response(Bun.file(join(vizDir, 'meta.json')), { headers: { 'cache-control': 'no-store' } })
           # agl_default: the model an empty '' spec resolves to (agl-ai's
@@ -138,6 +202,77 @@ export run = (argv, cwd = process.cwd()) ->
             return json({ error: 'bad index' }) unless slug
             out = await request(cwd, 'get_entity', { slug, include_links: true })
             json(Object.assign(out, { i, slug }))
+          when '/nodes'
+            # Multi-entity fetch for the Inspector (comma-separated slugs).
+            raw = url.searchParams.get('slugs') or ''
+            list = raw.split(',').map((s) -> decodeURIComponent(s.trim())).filter(Boolean)
+            list = list.slice(0, 64)
+            entities = []
+            for slug in list
+              try
+                out = await request(cwd, 'get_entity', { slug, include_links: true })
+                entities.push(Object.assign(out, { slug, i: (slugIndex.get(slug) ? -1) }))
+              catch err
+                entities.push({ slug, error: err.message or String(err) })
+            json({ entities })
+          when '/labels'
+            # Lightweight display-name lookup for entity links (batch).
+            # Returns { labels: { "Class/id": "Human Name", ... } } — never fails a
+            # whole request; missing entities map to the slug itself.
+            raw = url.searchParams.get('slugs') or ''
+            list = raw.split(',').map((s) -> decodeURIComponent(s.trim())).filter(Boolean)
+            list = list.slice(0, 100)
+            labels = {}
+            for slug in list
+              try
+                out = await request(cwd, 'get_entity', { slug, include_links: false })
+                labels[slug] = entityDisplayName(out, slug)
+              catch
+                labels[slug] = slug
+            json({ labels })
+          when '/entity-context'
+            # Preload entity YAML for LLM prompts (selected or wiki-referenced).
+            # GET ?slugs=a,b&tag=referenced-entities&notice=optional+line
+            raw = url.searchParams.get('slugs') or ''
+            tag = url.searchParams.get('tag') or 'referenced-entities'
+            tag = tag.replace(/[^\w-]/g, '') or 'referenced-entities'
+            notice = url.searchParams.get('notice') or ''
+            list = raw.split(',').map((s) -> decodeURIComponent(s.trim())).filter(Boolean)
+            list = list.slice(0, 32)
+            entities = []
+            for slug in list
+              try
+                out = await request(cwd, 'get_entity', { slug, include_links: true })
+                entities.push(Object.assign({ slug }, out))
+              catch
+                # skip missing — count matches emitted bodies
+            n = entities.length
+            countLine = if notice then notice else "NOTICE: #{n} entit#{if n is 1 then 'y' else 'ies'}."
+            unless n
+              return json({ text: "\n\n#{countLine}\n", slugs: list, found: 0 })
+            blocks = for e in entities
+              "<entity slug=\"#{e.slug}\">\n#{formatEntityYaml(e)}\n</entity>"
+            text = "\n\n#{countLine}\n\n<#{tag}>\n#{blocks.join('\n')}\n</#{tag}>\n"
+            json({ text, slugs: list, found: n })
+          when '/entity/set'
+            # Inspector field write: { slugs: [...], assignments: ['alias.field=value', ...] }
+            # Applies set_instance to every selected slug (multi-edit).
+            return json({ error: 'POST required' }) unless req.method is 'POST'
+            body = {}
+            try body = await req.json() catch then body = {}
+            slugList = body.slugs or []
+            slugList = [slugList] unless Array.isArray(slugList)
+            assignments = body.assignments or []
+            assignments = [assignments] unless Array.isArray(assignments)
+            return json({ error: 'slugs and assignments required' }) unless slugList.length and assignments.length
+            results = []
+            for slug in slugList
+              try
+                res = await request(cwd, 'set_instance', { slug, assignments })
+                results.push(Object.assign({ slug, ok: true }, res))
+              catch err
+                results.push({ slug, ok: false, error: err.message or String(err) })
+            json({ ok: results.every((r) -> r.ok), results })
           when '/search'
             res = await request(cwd, 'search', {
               query: url.searchParams.get('q') or '', limit: parseInt(url.searchParams.get('limit') or '25', 10)
@@ -241,17 +376,12 @@ export run = (argv, cwd = process.cwd()) ->
       close: (ws) -> hmrClients.delete(ws)
       message: ->
 
-  # HMR watcher: top-level public/ files only (index.html, app/ui/scene.js,
-  # styles.css) — vendor/ is not watched. Implemented as a 300ms mtime poll:
-  # fs.watch proved unreliable here (Bun's inotify subscription silently died
-  # after a couple of events, so edits stopped reaching the browser), and
-  # stat'ing a handful of files is effectively free. The poll interval also
-  # naturally coalesces rapid successive writes into one broadcast.
+  # HMR watcher: recursive public/ (except vendor/) via 300ms mtime poll.
+  # fs.watch proved unreliable here; stat'ing a handful of files is free.
   mtimes = new Map()
   setInterval (->
     try
-      for f in readdirSync(publicDir)
-        continue unless /\.(html|js|mjs|css|json)$/.test(f)
+      for f in listPublicFiles(publicDir)
         try m = statSync(join(publicDir, f)).mtimeMs catch then continue
         prev = mtimes.get(f)
         mtimes.set(f, m)
@@ -266,7 +396,7 @@ export run = (argv, cwd = process.cwd()) ->
 
   console.log "brain viz: serving http://127.0.0.1:#{port}   (Ctrl-C to stop)"
   console.log "  nodes: #{meta.nodes} · components: #{meta.components} (#{meta.isolated} isolated) · color: component · size: log-degree"
-  console.log "  HMR: watching #{publicDir} (edit ui.js / scene.js / styles.css live)"
+  console.log "  HMR: watching #{publicDir} (incl. chat/*) · chat: angela multi-session"
   console.log "  connected to brain server for hover/search lookups"
   await new Promise(->)   # serve until Ctrl-C
   0

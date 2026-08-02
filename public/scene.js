@@ -147,39 +147,147 @@ export async function boot() {
     for (const i of idxs) r = Math.max(r, nodeXYZ(i).distanceTo(c))
     flyTo(c, fitDist(r * 1.15))
   }
-  function frameSelection() { frameIdxs(st.highlightIdx.length ? st.highlightIdx : st.selectedIdx) }
+  // F key: frame the union of search highlights (yellow) and selection (white).
+  // Never prefer one to the exclusion of the other when both are non-empty.
+  function frameSelection() {
+    const seen = new Set()
+    const union = []
+    for (const i of st.highlightIdx || []) {
+      if (i >= 0 && !seen.has(i)) { seen.add(i); union.push(i) }
+    }
+    for (const i of st.selectedIdx || []) {
+      if (i >= 0 && !seen.has(i)) { seen.add(i); union.push(i) }
+    }
+    frameIdxs(union)
+  }
   function frameUniverse() { flyTo(new THREE.Vector3(0, 0, 0), fitDist(meta.world_radius)) }
+  /** Frame only the given slugs (entity-link double-click — not F-style union). */
+  async function frameSlugs(slugs) {
+    const list = (Array.isArray(slugs) ? slugs : [slugs]).filter(Boolean)
+    if (!list.length) return
+    const idxs = (await Promise.all(list.map(resolveSlug))).filter((i) => i >= 0)
+    if (idxs.length) frameIdxs(idxs)
+  }
 
   // ---------- input (all listeners on an AbortController for clean HMR) ----------
   const ac = new AbortController()
   const sig = { signal: ac.signal }
   const keys = new Set()
   let mmb = false, moved = false
+
+  // True when the user is typing in a form field or contenteditable (search /
+  // chat mention editors). Camera WASD / Space / hotkeys must not steal those.
+  function isTextEditable(el) {
+    if (!el || el === document.body || el === document.documentElement) return false
+    // Walk up: click may land on a child (pill icon, span) inside the editor
+    const node = el.nodeType === Node.TEXT_NODE ? el.parentElement : el
+    if (!node || !node.closest) return false
+    const host = node.closest(
+      'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]',
+    )
+    if (!host) return false
+    if (host.isContentEditable) return true
+    const tag = host.tagName
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true
+    if (tag === 'INPUT') {
+      const type = String(host.type || 'text').toLowerCase()
+      // Non-textual inputs shouldn't block camera
+      if (
+        type === 'button' || type === 'submit' || type === 'reset' ||
+        type === 'checkbox' || type === 'radio' || type === 'file' ||
+        type === 'image' || type === 'range' || type === 'color' ||
+        type === 'hidden'
+      ) return false
+      return true
+    }
+    return false
+  }
+  function isTypingFocus() {
+    return isTextEditable(document.activeElement)
+  }
+  /** Camera may consume keys only when focus is not in a text editor. */
+  function cameraKeysLive() {
+    return !isTypingFocus()
+  }
+
   addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return
+    // Typing in search / chat / inspector: never feed the camera key set
+    if (isTypingFocus() || isTextEditable(e.target)) return
     if (e.code === 'Space') e.preventDefault()   // Space = pan modifier only
     keys.add(e.code)
     if (e.code === 'KeyF' || e.code === 'NumpadDecimal') frameSelection()
     // Home = same as the ⌂ "back to universe" button (zoom all the way out)
     if (e.code === 'Home') { e.preventDefault(); frameUniverse() }
+    // Escape: clear selection (white) + search highlights (yellow) + path line
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      setOverlay(highlights, [])
+      store.api.setPath?.([])
+      store.openEntities([])
+      store.clearResults?.()
+      store.maybeCollapseSidebar?.()
+    }
     if (e.code === 'Numpad7') { rig.pitch = -1.55 }
     if (e.code === 'Numpad1') { rig.pitch = 0; rig.yaw = 0 }
     if (e.code === 'Numpad3') { rig.pitch = 0; rig.yaw = Math.PI / 2 }
   }, sig)
   addEventListener('keyup', (e) => keys.delete(e.code), sig)
+  // Focusing an editor clears sticky WASD/Space so the camera stops immediately
+  addEventListener('focusin', (e) => {
+    if (isTextEditable(e.target)) keys.clear()
+  }, sig)
+
   canvas.addEventListener('contextmenu', (e) => e.preventDefault(), sig)
   canvas.addEventListener('mousedown', (e) => {
     moved = false
-    if (e.button === 1) { mmb = true; e.preventDefault() }
+    // Clicking the world releases text focus so keys go back to the camera
+    // and middle-click won't paste into a still-focused contenteditable.
+    if (isTypingFocus()) {
+      try { document.activeElement?.blur?.() } catch { /* ignore */ }
+    }
+    if (e.button === 1) {
+      mmb = true
+      e.preventDefault() // block Linux/X11 middle-click paste into focused fields
+    }
   }, sig)
+
+  // Global MMB: paste only when middle-clicking *inside* the focused editor;
+  // otherwise prevent paste and (if on canvas) orbit was already started above.
+  addEventListener('mousedown', (e) => {
+    if (e.button !== 1) return
+    const active = document.activeElement
+    const onFocusedEditor =
+      isTextEditable(active) &&
+      (active === e.target || active.contains?.(e.target))
+    if (onFocusedEditor) {
+      // Let the browser paste into the focused field; no camera orbit
+      mmb = false
+      return
+    }
+    // Anywhere else: never paste (esp. into unfocused search/chat)
+    e.preventDefault()
+  }, { capture: true, signal: ac.signal })
+  addEventListener('auxclick', (e) => {
+    if (e.button !== 1) return
+    const active = document.activeElement
+    const onFocusedEditor =
+      isTextEditable(active) &&
+      (active === e.target || active.contains?.(e.target))
+    if (!onFocusedEditor) e.preventDefault()
+  }, { capture: true, signal: ac.signal })
+
   addEventListener('mouseup', (e) => {
     if (e.button === 1) mmb = false
-    if (e.button === 0 && !moved && !keys.has('Space')) pick(e, e.ctrlKey)
+    if (e.button === 0 && !moved && cameraKeysLive() && !keys.has('Space')) {
+      pick(e, e.ctrlKey || e.metaKey || e.shiftKey)
+    }
   }, sig)
   addEventListener('mousemove', (e) => {
     const dx = e.movementX, dy = e.movementY
     if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
-    if (keys.has('Space') || (mmb && e.shiftKey)) {
+    // Space-pan only when not typing; MMB orbit only when not pasting in an editor
+    const spacePan = cameraKeysLive() && keys.has('Space')
+    if (spacePan || (mmb && e.shiftKey)) {
       // hold Space: pan follows the mouse delta directly (no button needed)
       const right = new THREE.Vector3().crossVectors(rigDir(), new THREE.Vector3(0, 0, 1)).normalize()
       const up = new THREE.Vector3().crossVectors(right, rigDir()).normalize()
@@ -196,7 +304,7 @@ export async function boot() {
     e.preventDefault()
   }, { passive: false, signal: ac.signal })
 
-  // ---------- picking (click = select; Ctrl+click = multi-select toggle) ----------
+  // ---------- picking (click = select; Ctrl/Cmd/Shift+click = multi-select toggle) ----------
   // Screen-space picking: project every node EXACTLY as the shader renders it
   // (including the 2D/3D zMix flatten) and select the node whose on-screen
   // center is nearest the cursor. Click-what-you-see by construction — no
@@ -233,6 +341,8 @@ export async function boot() {
   function syncSelection() {
     setOverlay(selection, st.selectedIdx)
     store.selectedSlugs = st.selectedIdx.map((i) => st.slugCache[i]).filter(Boolean)
+    // Lime-highlight entity links that are in the selection set
+    store.syncEntityLinkSelection?.()
   }
   // Selection is URL-first: a node click resolves its slug then routes through
   // store.openEntities (ui.js) → Router pushState → applyEntitySelection below.
@@ -256,18 +366,43 @@ export async function boot() {
   async function applyEntitySelection(slugs) {
     const zoom = !store.skipZoomOnce   // one-shot flag from canvas clicks
     store.skipZoomOnce = false
+    // Entity-link double-click: select without auto-zoom, then frame explicitly
+    // once selection indices are resolved (works even if selection was unchanged).
+    const frameAfter = !!store.frameAfterSelectOnce
+    store.frameAfterSelectOnce = false
     const cur = st.selectedIdx.map((i) => st.slugCache[i])
-    if (slugs.length === cur.length && slugs.every((s, j) => s === cur[j])) return
+    const same =
+      slugs.length === cur.length && slugs.every((s, j) => s === cur[j])
+    if (same) {
+      if (frameAfter && st.selectedIdx.length) frameIdxs(st.selectedIdx)
+      return
+    }
     const idxs = (await Promise.all(slugs.map(resolveSlug))).filter((i) => i >= 0)
     st.selectedIdx = idxs
     syncSelection()
     // zero entities selected (empty-space click, ctrl-toggle-off, route to /):
-    // clear the detail pane and auto-collapse the sidebar (animates via the
-    // .collapsed transform transition)
-    if (!idxs.length) { store.detailSlug = ''; store.collapsed = true; return }
-    if (zoom) frameIdxs(idxs)
-    const d = await (await fetch('/node?i=' + idxs[idxs.length - 1])).json()
-    store.showDetail(d)
+    // clear the inspector (white selection rings already gone via syncSelection).
+    // Yellow rings = search/think hit highlights — keep them while SERPS is open;
+    // otherwise clear so they don't linger after a query is dismissed.
+    if (!idxs.length) {
+      store.detailSlug = ''
+      store.loadInspector?.([])
+      if (!store.showSerps?.()) {
+        setOverlay(highlights, [])
+        store.api.setPath?.([])
+      }
+      store.maybeCollapseSidebar?.()
+      return
+    }
+    if (zoom || frameAfter) frameIdxs(idxs)
+    // Multi-select inspector: load all selected entities (Unity mixed fields)
+    const selSlugs = idxs.map((i) => st.slugCache[i]).filter(Boolean)
+    if (selSlugs.length) {
+      await store.loadInspector(selSlugs)
+    } else {
+      const d = await (await fetch('/node?i=' + idxs[idxs.length - 1])).json()
+      store.showDetail(d)
+    }
   }
   syncSelection()   // restore overlay + selectedSlugs after HMR
 
@@ -283,6 +418,7 @@ export async function boot() {
     },
     frameUniverse,
     frameSelection,
+    frameSlugs, // entity-link dblclick: frame only these slugs (not highlight union)
     toggle3d: () => {
       st.zMixTarget = st.zMixTarget ? 0 : 1
       store.is3d = st.zMixTarget === 1
@@ -324,6 +460,16 @@ export async function boot() {
   }
 
   // ---------- main loop ----------
+  // Fly inertia (Quake1-style SV_Friction + SV_Accelerate on the orbit target).
+  // Wishdir from WASD/QE, max speed scales with rig.dist so feel stays consistent
+  // when zoomed; friction gives coast-out, accelerate gives spin-up from rest.
+  const flyVel = new THREE.Vector3()
+  const FLY_FRICTION = 6     // sv_friction-ish (Quake ground ~4–6)
+  const FLY_ACCEL = 10       // sv_accelerate (Quake default 10)
+  const FLY_STOPSPEED = 0.15 // fraction of maxSpeed used as Quake "stopspeed" floor
+  const FLY_MAX = 0.9        // peak speed = FLY_MAX * rig.dist (matches old instant speed)
+  const FLY_EPS = 1e-5
+
   function resize() {
     renderer.setSize(innerWidth, innerHeight, false)
     camera.aspect = innerWidth / innerHeight
@@ -336,17 +482,58 @@ export async function boot() {
   let last = performance.now()
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now
-    if (!keys.has('ControlLeft') && !keys.has('ControlRight')) {
-      const fwd = rigDir(), upW = new THREE.Vector3(0, 0, 1)
-      const right = new THREE.Vector3().crossVectors(fwd, upW).normalize()
-      const v = new THREE.Vector3()
-      if (keys.has('KeyW')) v.add(fwd)
-      if (keys.has('KeyS')) v.sub(fwd)
-      if (keys.has('KeyD')) v.add(right)
-      if (keys.has('KeyA')) v.sub(right)
-      if (keys.has('KeyE')) v.add(upW)
-      if (keys.has('KeyQ')) v.sub(upW)
-      if (v.lengthSq()) rig.target.addScaledVector(v.normalize(), dt * rig.dist * 0.9)
+    // Scripted fly-to: kill residual fly velocity so inertia doesn't fight the tween
+    if (anim.active) {
+      flyVel.set(0, 0, 0)
+    } else if (!keys.has('ControlLeft') && !keys.has('ControlRight')) {
+      const fwd = rigDir()
+      const upW = new THREE.Vector3(0, 0, 1)
+      let right = new THREE.Vector3().crossVectors(fwd, upW)
+      if (right.lengthSq() < 1e-8) right.set(1, 0, 0)
+      else right.normalize()
+
+      // wish direction from held keys (camera-relative, Quake "wishdir").
+      // While a text field / contenteditable has focus, ignore movement keys
+      // so typing WASD/Space never flies the camera.
+      const wish = new THREE.Vector3()
+      if (cameraKeysLive()) {
+        if (keys.has('KeyW')) wish.add(fwd)
+        if (keys.has('KeyS')) wish.sub(fwd)
+        if (keys.has('KeyD')) wish.add(right)
+        if (keys.has('KeyA')) wish.sub(right)
+        if (keys.has('KeyE')) wish.add(upW)
+        if (keys.has('KeyQ')) wish.sub(upW)
+      }
+
+      const maxSpeed = Math.max(1, rig.dist * FLY_MAX)
+
+      // --- SV_Friction: always, so release keys → smooth coast to stop ---
+      const speed = flyVel.length()
+      if (speed > 0) {
+        // Quake: control = max(speed, stopspeed); drop = control * friction * dt
+        const stopspeed = maxSpeed * FLY_STOPSPEED
+        const control = speed < stopspeed ? stopspeed : speed
+        const drop = control * FLY_FRICTION * dt
+        const newspeed = speed - drop
+        if (newspeed <= 0) flyVel.set(0, 0, 0)
+        else flyVel.multiplyScalar(newspeed / speed)
+      }
+
+      // --- SV_Accelerate: push velocity toward wishdir * maxSpeed ---
+      if (wish.lengthSq() > 0) {
+        wish.normalize()
+        const currentspeed = flyVel.dot(wish)
+        const addspeed = maxSpeed - currentspeed
+        if (addspeed > 0) {
+          // Quake: accelspeed = accel * frametime * wishspeed
+          let accelspeed = FLY_ACCEL * dt * maxSpeed
+          if (accelspeed > addspeed) accelspeed = addspeed
+          flyVel.addScaledVector(wish, accelspeed)
+        }
+      }
+
+      if (flyVel.lengthSq() > FLY_EPS) rig.target.addScaledVector(flyVel, dt)
+      else flyVel.set(0, 0, 0)
     }
     if (anim.active) {
       anim.t = Math.min(1, anim.t + dt / 0.6)

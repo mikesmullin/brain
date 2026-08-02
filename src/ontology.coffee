@@ -5,7 +5,7 @@
 # whole-world scan); the model only decides where to look.
 import Agent from 'agl-ai'
 import { hybridSearch } from './search.coffee'
-import { thinkPrefix, selectionContext } from './think.coffee'
+import { thinkPrefix, buildPromptEntityContext } from './think.coffee'
 
 # Longest practical wall-clock stamp for the system prompt: full weekday, month
 # name, day, year, 12h time with seconds + ms, long timezone name, plus ISO-8601
@@ -29,9 +29,11 @@ formatSystemTime = (d = new Date()) ->
 export ontologyQuery = (core, question, opts = {}) ->
   model = opts.model or core.cfg.think.model
 
-  # Selection (toggle-on only) + wall-clock are interpolated into the template
-  # below — keep dynamic bits here, not scattered across the factory call.
-  selCtx = await selectionContext(core, opts.selection)
+  # Selected entities (toggle-on) + wiki-link references in the question
+  # are preloaded into the system prompt so tools aren't needed for those.
+  entCtx = await buildPromptEntityContext core,
+    selection: opts.selection
+    question: question
   system = """
 #{thinkPrefix(model, opts.thinking)}
 You're a research assistant.
@@ -39,10 +41,16 @@ You help me (a researcher) to (answer relational questions) by (traversing a typ
 I (the human operator) am interacting with you via (the ontology browser app).
 
 Use your tools to navigate the ontology data to learn more about entities and their relationships.
+When the system prompt already includes <selected-entities> or <referenced-entities>,
+use those bodies first — do not re-fetch them unless you need fresher or related data.
 
 ## How to reply
 
-IMPORTANT: Never refer to an entity by its slug--Always refer to it by its proper name, and if you don't have that then use `db__get_entity` to obtain it.
+IMPORTANT: Always refer to an entity by its slug (this will cause the app UI to auto-expand its name), using wikilinks in one of the following formats
+  - `[[Class/id]]`
+  - `[[Class/id|display text]]`
+  - `[[REL:Class/id]]`
+  - `[[REL:Class/id|display text]]`
 
 If I refer to context you don't have, then ask me clarifying questions.
 
@@ -63,7 +71,7 @@ The data is historical and does not imply wrongdoing.
 
 <system_time>#{formatSystemTime()}</system_time>
 
-#{selCtx}
+#{entCtx}
 """
 
   agent = await Agent.factory

@@ -9,7 +9,14 @@ import { serializeEntity } from './storage.coffee'
 SYSTEM = """
 You synthesize an answer about a knowledge graph using ONLY the retrieved context.
 Rules:
-- Cite supporting entities inline using their slug in square brackets, e.g. [Team/team-cloud].
+- Cite supporting entities inline as wiki-links (full grammar):
+    [[Class/id]]
+    [[Class/id|display text]]
+    [[REL:Class/id]]
+    [[REL:Class/id|display text]]
+  Prefer [[Class/id|human name]] when you know a readable name; the UI shows that text.
+- If the system prompt includes <selected-entities> or <referenced-entities>, treat those
+  YAML bodies as ground truth for those slugs (preloaded from the app — no need to re-fetch).
 - Do NOT invent entities, relations, or facts not present in the context.
 - If the context is insufficient, say so and list what's missing in `gaps`.
 - Keep `answer` concise and directly responsive to the question.
@@ -21,27 +28,74 @@ Rules:
 export thinkPrefix = (model, thinking) ->
   if thinking and String(model or '').startsWith('lm-studio:') then '<|think|>\n' else ''
 
-# Selection block for system prompts (think / ontology).
-#
-# Only when the viz "include selection" toggle is ON does the client pass
-# `selection` (possibly an empty array). Toggle OFF → `selection` is undefined
-# and we emit nothing (no deictic blurb, no count, no entities).
-#
-#   undefined / null  → toggle off: omit entirely
-#   [] / [slugs...]   → toggle on: deictic guidance + count + optional YAML bodies
-export selectionContext = (core, selection) ->
-  return '' unless selection?
+# ── Entity context blocks for system prompts (think / ontology / chat) ────
+# Two lists:
+#   <selected-entities>   — graph multi-select (toggle-on only)
+#   <referenced-entities> — wiki-links [[Class/id]]… extracted from the user prompt
+# Referenced bodies are preloaded so the model need not tool-fetch them first.
 
-  slugs = if Array.isArray(selection) then selection.filter(Boolean) else []
-  # Resolve entities first so the count matches what we actually emit
-  # (missing slugs are skipped rather than hallucinated as empty shells).
+RELATION_KEY_RE = /^[A-Z][A-Z0-9_]*$/
+# Class/id; id may include spaces (LLM wiki prose). Rejects | [ ] in the slug.
+WIKI_SLUG_RE = /^[A-Za-z][\w]*\/[^\|\[\]]+$/
+WIKILINK_RE = /\[\[\s*([^\]]+?)\s*\]\]/g
+
+# Parse one wiki-inner (Class/id, |label, REL:) → slug or null
+parseWikiSlug = (raw) ->
+  target = String(raw or '').trim()
+  return null unless target
+  ci = target.indexOf(':')
+  if ci > 0 and RELATION_KEY_RE.test(target.slice(0, ci))
+    target = target.slice(ci + 1).trim()
+  pipe = target.indexOf('|')
+  target = target.slice(0, pipe).trim() if pipe >= 0
+  target = target.replace(/\s+/g, ' ').trim()
+  return null unless WIKI_SLUG_RE.test(target)
+  return null unless target.slice(target.indexOf('/') + 1).trim()
+  target
+
+# Extract unique Class/id targets from free text:
+#   [[wiki]] · [single] · bare Class/id (no spaces in bare id)
+export extractWikiSlugs = (text) ->
+  out = []
+  seen = new Set()
+  return out unless text
+  src = String(text)
+  add = (slug) ->
+    return unless slug
+    return if seen.has(slug)
+    seen.add(slug)
+    out.push(slug)
+
+  # Double-bracket
+  re = new RegExp(WIKILINK_RE.source, 'g')
+  while (m = re.exec(src))
+    add(parseWikiSlug(m[1]))
+  # Single-bracket (not markdown [text](url))
+  re = /(?<!\[)\[([^\]]+?)\](?!\()/g
+  while (m = re.exec(src))
+    add(parseWikiSlug(m[1]))
+  # Bare Class/id
+  re = /\b([A-Z][A-Za-z0-9]*\/[A-Za-z0-9][A-Za-z0-9._-]*)\b/g
+  while (m = re.exec(src))
+    add(m[1])
+  out
+
+# Resolve slugs → YAML entity blocks inside <tag>…</tag>.
+# Missing entities are skipped (count matches what we emit).
+export entityListContext = (core, slugs, opts = {}) ->
+  tag = opts.tag or 'entities'
+  list = (slugs or []).filter(Boolean)
   entities = []
-  for slug in slugs
+  for slug in list
     e = await core.idx.fullEntity(slug)
     entities.push(e) if e
   n = entities.length
-  countLine = "NOTICE: In the app, I have selected #{n} #{if n is 1 then 'entity' else 'entities'}."
-
+  countLine = if typeof opts.notice is 'function'
+    opts.notice(n)
+  else if opts.notice?
+    opts.notice
+  else
+    "NOTICE: #{n} entit#{if n is 1 then 'y' else 'ies'}."
   return "\n\n#{countLine}\n" unless n
 
   blocks = for e in entities
@@ -55,10 +109,50 @@ export selectionContext = (core, selection) ->
 
 #{countLine}
 
-<selected-entities>
+<#{tag}>
 #{blocks.join('\n')}
-</selected-entities>
+</#{tag}>
 """
+
+# Selection block for system prompts (think / ontology).
+#
+# Only when the viz "include selection" toggle is ON does the client pass
+# `selection` (possibly an empty array). Toggle OFF → `selection` is undefined
+# and we emit nothing (no deictic blurb, no count, no entities).
+#
+#   undefined / null  → toggle off: omit entirely
+#   [] / [slugs...]   → toggle on: deictic guidance + count + optional YAML bodies
+export selectionContext = (core, selection) ->
+  return '' unless selection?
+  await entityListContext core, selection,
+    tag: 'selected-entities'
+    notice: (n) ->
+      "NOTICE: In the app, I have selected #{n} #{if n is 1 then 'entity' else 'entities'}."
+
+# Wiki-links in the user prompt → preloaded entity YAML (skip tool lookup).
+export referencedEntitiesContext = (core, slugs) ->
+  return '' unless slugs?.length
+  await entityListContext core, slugs,
+    tag: 'referenced-entities'
+    notice: (n) ->
+      "NOTICE: The user prompt references #{n} #{if n is 1 then 'entity' else 'entities'} via wiki-links (preloaded — prefer these over re-fetching)."
+
+# Combined selected + referenced blocks. Referenced slugs already in the
+# selection list are omitted from <referenced-entities> to avoid duplicate YAML.
+export buildPromptEntityContext = (core, opts = {}) ->
+  selection = opts.selection
+  question = opts.question or ''
+  refs = if opts.references? then opts.references else extractWikiSlugs(question)
+  selSet = new Set()
+  if selection?
+    selSet.add(s) for s in (if Array.isArray(selection) then selection else []) when s
+  refs = (refs or []).filter (s) -> s and not selSet.has(s)
+  parts = []
+  if selection?
+    parts.push(await selectionContext(core, selection))
+  if refs.length
+    parts.push(await referencedEntitiesContext(core, refs))
+  parts.join('')
 
 export think = (core, question, opts = {}) ->
   limit = opts.limit or 8
@@ -72,7 +166,9 @@ export think = (core, question, opts = {}) ->
     "<entity slug=\"#{r.slug}\">\n#{renderEntityText(e)}\n</entity>"
   context = blocks.filter((b) -> b).join('\n')
 
-  selCtx = await selectionContext(core, opts.selection)
+  entCtx = await buildPromptEntityContext core,
+    selection: opts.selection
+    question: question
   throw new Error('cancelled by user') if opts.isCancelled?()
   agent = await Agent.factory
     model: model
@@ -84,7 +180,7 @@ export think = (core, question, opts = {}) ->
     # 0 retries: a cancelled/stuck inference must not re-fire (default AGL is 5).
     # Honored centrally by withProviderRetry for every provider.
     retries: 0
-    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + selCtx
+    system_prompt: thinkPrefix(model, opts.thinking) + SYSTEM + entCtx
     output_tool:
       name: 'answer'
       description: 'Report the synthesized, grounded answer with citations and gaps.'
