@@ -4,6 +4,9 @@
 //   - the camera rig + view state persist on window.__VIZ_STATE__
 //   - each boot disposes the previous scene (listeners, RAF, GL resources)
 // so editing this file hot-swaps behavior without losing your place in space.
+// three.js is the inner partner: it only paints #world. HUD state flows
+// through M.store('viz') (m.js outer shell); scene installs store.api actions
+// and reads selection/highlights — never mounts into #app.
 import * as THREE from 'three'
 import M from 'https://mikesmullin.github.io/m-js/dist/m.min.js'
 

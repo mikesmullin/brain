@@ -1,11 +1,11 @@
 <!doctype html>
 <!-- brain viz shell — static skeleton only.
-     The HUD is an m.js component tree (ui.js) mounted into #app; the three.js
-     world (scene.js) binds to the pre-existing #world canvas. Both are
-     re-imported with cache-busting by window.__M_BOOT__ on m.js HMR pushes
+     m.js (CDN) owns the HUD: Alpine-style template → AST → VNode → keyed diff
+     into #app (ui.js). three.js owns the WebGL canvas (#world) only. Both are
+     re-imported with cache-busting by window.__M_BOOT__ on HMR pushes
      (see /__m_hmr in the viz server), so edits to /ui.js, /scene.js,
      /styles.css, or /app.js hot-reload without losing camera or store state.
-     #world, #fps, #mjs-draws live OUTSIDE #app so M re-renders never touch them. -->
+     #world, #fps, #mjs-draws live OUTSIDE #app so VDOM diffs never touch them. -->
 <html>
 <head>
 <meta charset="utf-8">

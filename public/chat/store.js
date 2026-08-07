@@ -160,7 +160,11 @@ export function registerChatStore() {
     ms: '',
     _elapsedTimer: null,
     _elapsedT0: 0,
-    /** Bumped on stream tokens so fine-grained UI stays live (m.js). */
+    /**
+     * Legacy counter kept for HMR-stable store shape. m.js v3 deep proxies
+     * already schedule one coalesced redraw on msg.text / history mutations —
+     * templates no longer read streamTick to force paint.
+     */
     streamTick: 0,
     _scrollProgrammatic: false,
     _bootstrapped: false,
@@ -194,7 +198,6 @@ export function registerChatStore() {
         if (typeof fetch === 'function') void this.bootstrap();
       }
       queueMicrotask(() => {
-        this.syncSelects();
         this.ensureMessagesPinned();
       });
     },
@@ -534,53 +537,12 @@ export function registerChatStore() {
       }
     },
 
-    fillSelect(el, items, selected) {
-      if (!el) return;
-      const cur = selected == null ? '' : String(selected);
-      el.innerHTML = '';
-      if (!items.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '(none)';
-        el.appendChild(o);
-        return;
-      }
-      for (const item of items) {
-        const value = typeof item === 'string' ? item : item.value;
-        const label =
-          typeof item === 'string' ? item : item.label || item.value;
-        const o = document.createElement('option');
-        o.value = value;
-        o.textContent =
-          String(label).length > 42
-            ? `${String(label).slice(0, 20)}…${String(label).slice(-18)}`
-            : label;
-        if (value === cur) o.selected = true;
-        el.appendChild(o);
-      }
-    },
-
+    /**
+     * Agent / model / effort <select>s are declarative (x-for + :value) in
+     * ui.js. Kept as a no-op so older call sites and HMR don't break.
+     */
     syncSelects() {
-      queueMicrotask(() => {
-        const agents = this.agents.map((a) => ({
-          value: a.name,
-          label: a.name,
-        }));
-        const models = this.modelOptions.map((m) => ({
-          value: m,
-          label: m,
-        }));
-        const agent = this.activeTab?.agent;
-        const model = this.activeTab?.model;
-        this.fillSelect(document.getElementById('viz-chat-agent'), agents, agent);
-        this.fillSelect(document.getElementById('viz-chat-model'), models, model);
-        // Reasoning effort dropdown (static options; keep selection)
-        const effortEl = document.getElementById('viz-chat-effort');
-        if (effortEl) {
-          const cur = this.reasoningEffort || 'medium';
-          if (effortEl.value !== cur) effortEl.value = cur;
-        }
-      });
+      // no-op — VDOM owns the option lists
     },
 
     async bootstrap() {
@@ -1555,9 +1517,9 @@ export function registerChatStore() {
       try {
         const r = await fetch('/api/sessions');
         const j = await r.json();
+        // Full replace → one reactive notify → one coalesced redraw
         this.history = j.sessions || [];
         if (j.projectRoot) this.projectRoot = j.projectRoot;
-        this.streamTick = (this.streamTick || 0) + 1;
       } catch {
         /* ignore */
       }
@@ -1666,7 +1628,6 @@ export function registerChatStore() {
           }
         }
         await this.refreshHistory();
-        this.streamTick = (this.streamTick || 0) + 1;
         syncDraftEditor(this);
       } catch (err) {
         console.error('[chat] deleteSession failed', err);
@@ -1698,7 +1659,7 @@ export function registerChatStore() {
             /* ignore */
           }
         }
-        // Sync list from server (should be empty), then force history UI repaint
+        // Sync list from server (should be empty); reactive assign paints history
         await this.refreshHistory();
         if (!Array.isArray(this.history)) this.history = [];
         if (this.history.length) {
@@ -1706,7 +1667,6 @@ export function registerChatStore() {
           this.history.splice(0, this.history.length);
         }
         this.history = [];
-        this.streamTick = (this.streamTick || 0) + 1;
         syncDraftEditor(this);
         this.scheduleScrollBottom?.();
       } catch (err) {
@@ -1744,19 +1704,17 @@ export function registerChatStore() {
       }
     },
 
-    /** Kick stick-to-bottom + a light tick so stream tokens paint every frame. */
+    /**
+     * Stick-to-bottom while tokens arrive. Painting is free: each msg.text
+     * write already schedules one coalesced m.js redraw (≤1 flush/frame).
+     */
     noteStreamPaint() {
       this.scheduleScrollBottom();
-      if (this._streamRaf) return;
-      this._streamRaf = requestAnimationFrame(() => {
-        this._streamRaf = 0;
-        this.streamTick = (this.streamTick || 0) + 1;
-      });
     },
 
     /**
      * Append a streaming token into the last open assistant/reasoning bubble.
-     * Mutates through the reactive array slot so m.js x-text re-renders live.
+     * Deep-reactive: mutating msg.text notifies m.js without a manual tick.
      */
     appendStreamDelta(tab, kind, chunk) {
       if (!chunk) return;

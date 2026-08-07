@@ -1,7 +1,15 @@
 // ui.js — the flat HUD layer, as an m.js component tree over a named store.
-// The store survives HMR (window.__M_STORES__): query text, results, sidebar
-// state, and chip settings all persist across hot edits of this file.
+// The store survives HMR (window.__M_ALPINE_STORES__): query text, results,
+// sidebar state, and chip settings all persist across hot edits of this file.
 // scene.js installs its camera/highlight actions onto store.api after boot.
+//
+// m.js v3 rendering model (VDOM):
+//   template → AST (once) → VNodes per redraw → keyed diff → DOM
+// Any reactive store write schedules ONE coalesced rAF redraw. Unchanged
+// state → zero DOM writes. Do not force extra ticks (streamTick etc.) for
+// ordinary mutations — deep proxies already notify. Imperative DOM is only
+// for contenteditable mention hosts (empty VDOM children) and x-html
+// markdown (RawHTMLVNode; re-hydrate labels after string changes).
 //
 // Entity selection is a first-class SPA route: /e/slug1,slug2 (comma-separated
 // multi-select). Every way of selecting an entity — clicking a node in the
@@ -171,12 +179,14 @@ const TEMPLATE = `
       <option value="graphql">graphql</option>
     </select>
     <span id="searchopts" x-show="$store.viz.mode === 'search'">
-      <span :class="'chip ' + ($store.viz.strategy === 'hybrid' ? 'on' : '')" @click="$store.viz.setStrategy('hybrid')">hybrid</span>
-      <span :class="'chip ' + ($store.viz.strategy === 'keyword' ? 'on' : '')" @click="$store.viz.setStrategy('keyword')">keyword</span>
-      <span :class="'chip ' + ($store.viz.strategy === 'vector' ? 'on' : '')" @click="$store.viz.setStrategy('vector')">vector</span>
-      <span :class="'chip ' + ($store.viz.expand ? 'on' : '')" @click="$store.viz.toggleExpand()" title="1-hop relational expansion">expand</span>
+      <span class="chip" :class="{ on: $store.viz.strategy === 'hybrid' }" @click="$store.viz.setStrategy('hybrid')">hybrid</span>
+      <span class="chip" :class="{ on: $store.viz.strategy === 'keyword' }" @click="$store.viz.setStrategy('keyword')">keyword</span>
+      <span class="chip" :class="{ on: $store.viz.strategy === 'vector' }" @click="$store.viz.setStrategy('vector')">vector</span>
+      <span class="chip" :class="{ on: $store.viz.expand }" @click="$store.viz.toggleExpand()" title="1-hop relational expansion">expand</span>
     </span>
     <span class="qwrap">
+      <!-- Contenteditable: empty VDOM children so the mention editor owns the
+           subtree; only attributes are patched across redraws. -->
       <div id="q" class="mention-editor mention-editor-single"
            contenteditable="true" role="textbox" spellcheck="false"
            data-empty="1"
@@ -184,24 +194,26 @@ const TEMPLATE = `
       <i class="ph ph-x qclear" x-show="$store.viz.q" title="clear" @click="$store.viz.clearQ()"></i>
     </span>
     <button id="go" x-show="!$store.viz.busy" title="run query" @click="$store.viz.run()">⏎</button>
-    <button id="stop" x-show="$store.viz.busy" :class="$store.viz.stopping ? 'stopping' : ''"
+    <button id="stop" x-show="$store.viz.busy" :class="{ stopping: $store.viz.stopping }"
             :title="$store.viz.stopping ? 'cancelling…' : 'cancel this query'"
             @click="$store.viz.stop()"><i class="ph-fill ph-stop"></i></button>
   </div>
 
   <div id="status" x-text="$store.viz.statusText"></div>
-  <div id="home" :class="'edgebtn panel' + ($store.viz.collapsed ? ' collapsed' : '')"
+  <div id="home" class="edgebtn panel" :class="{ collapsed: $store.viz.collapsed }"
        title="back to universe (frame everything)" @click="$store.viz.api.frameUniverse()">⌂</div>
-  <div id="collapse" :class="'edgebtn panel' + ($store.viz.collapsed ? ' collapsed' : '')"
+  <div id="collapse" class="edgebtn panel" :class="{ collapsed: $store.viz.collapsed }"
        @click="$store.viz.collapsed = !$store.viz.collapsed"
        x-text="$store.viz.collapsed ? '‹' : '›'"></div>
 
   <div id="sidebar"
-       :class="'panel'
-         + ($store.viz.collapsed ? ' collapsed' : '')
-         + ($store.viz._resizing ? ' resizing' : '')
-         + (!$store.chat.showChat ? ' no-chat' : '')
-         + (!$store.chat.showChat && !$store.viz.showSerps() ? ' chat-empty' : '')"
+       class="panel"
+       :class="{
+         collapsed: $store.viz.collapsed,
+         resizing: $store.viz._resizing,
+         'no-chat': !$store.chat.showChat,
+         'chat-empty': !$store.chat.showChat && !$store.viz.showSerps(),
+       }"
        :style="$store.viz.sidebarStyle()">
     <!-- left-edge width drag handle -->
     <div class="sidebar-resize-w" title="Drag to resize width"
@@ -278,19 +290,19 @@ const TEMPLATE = `
             <span>History</span>
             <button type="button" class="icon-btn trash-all"
                     title="Delete all sessions"
-                    x-show="($store.chat.streamTick, $store.chat.history.length)"
+                    x-show="$store.chat.history.length"
                     @click="$store.chat.cleanAllSessions()">
               <i class="ph ph-trash" aria-hidden="true"></i>
             </button>
           </div>
           <div class="chat-history-list">
-            <!-- streamTick forces repaint after cleanAllSessions / deleteSession -->
+            <!-- history is a reactive array; assign/splice/replace schedules one redraw -->
             <div class="chat-history-empty"
-                 x-show="!($store.chat.streamTick, $store.chat.history.length)">
+                 x-show="!$store.chat.history.length">
               No sessions yet
             </div>
             <div class="chat-history-row"
-                 x-for="item in ($store.chat.streamTick, $store.chat.history)"
+                 x-for="item in $store.chat.history"
                  :key="item.id"
                  :class="{ active: item.id === $store.chat.activeSessionId }">
               <button type="button" class="chat-history-item"
@@ -340,7 +352,8 @@ const TEMPLATE = `
                x-html="$store.chat.userMessageHtml(msg)"></div>
           <div class="bubble-assistant md-body is-streaming"
                x-show="msg.kind === 'assistant' && msg.streaming">
-            <span x-text="(msg.text || '') + ($store.chat.streamTick, '')"></span><span class="stream-caret" aria-hidden="true"></span>
+            <!-- msg.text is deep-reactive; each token write coalesces to ≤1 redraw/frame -->
+            <span x-text="msg.text || ''"></span><span class="stream-caret" aria-hidden="true"></span>
           </div>
           <div class="bubble-assistant md-body"
                x-show="msg.kind === 'assistant' && !msg.streaming"
@@ -351,8 +364,7 @@ const TEMPLATE = `
               <i class="ph ph-brain reasoning-icon" aria-hidden="true"></i>
               <span class="reasoning-label">Reasoning</span>
             </div>
-            <div class="reasoning-body"
-                 x-text="(msg.text || '') + ($store.chat.streamTick, '')"></div>
+            <div class="reasoning-body" x-text="msg.text || ''"></div>
           </div>
           <div class="tool-card tool-call-card" x-show="msg.kind === 'tool_call'">
             <div class="tool-call-header">
@@ -469,20 +481,30 @@ const TEMPLATE = `
             </div>
             <div class="tools-loading" x-show="$store.chat.toolsCatalogLoading">Loading tools…</div>
           </div>
+          <!-- Contenteditable: empty VDOM children; mention editor owns subtree. -->
           <div class="draft-ta mention-editor mention-editor-multi" id="viz-chat-draft"
                contenteditable="true" role="textbox" spellcheck="true"
                data-empty="1"
                data-placeholder="Message… (Enter send, Shift+Enter newline, @mention)"></div>
           <div class="composer-row">
             <select class="dd agent-dd" id="viz-chat-agent"
+                    :value="$store.chat.activeTab?.agent || ''"
                     @change="$store.chat.onAgentChange($event)"
                     :disabled="$store.chat.activeWaiting || !$store.chat.agents.length"
-                    title="Agent"></select>
+                    title="Agent">
+              <option x-for="a in $store.chat.agents" :key="a.name"
+                      :value="a.name" x-text="a.name"></option>
+            </select>
             <select class="dd model-dd" id="viz-chat-model"
+                    :value="$store.chat.activeTab?.model || ''"
                     @change="$store.chat.onModelChange($event)"
                     :disabled="$store.chat.activeWaiting || !$store.chat.modelOptions.length"
-                    title="Model"></select>
+                    title="Model">
+              <option x-for="m in $store.chat.modelOptions" :key="m"
+                      :value="m" x-text="$store.chat.shortModel(m)"></option>
+            </select>
             <select class="dd effort-dd" id="viz-chat-effort"
+                    :value="$store.chat.reasoningEffort || 'medium'"
                     @change="$store.chat.onEffortChange($event)"
                     :disabled="$store.chat.activeWaiting"
                     title="Reasoning effort (provider effort; Gemma 4 also uses depth phrases)">
@@ -610,7 +632,7 @@ const TEMPLATE = `
   </div>
 
   <div id="mode3d" class="panel" @click="$store.viz.api.toggle3d()">
-    <i :class="'ph ' + ($store.viz.is3d ? 'ph-square' : 'ph-cube')"></i>
+    <i class="ph" :class="{ 'ph-square': $store.viz.is3d, 'ph-cube': !$store.viz.is3d }"></i>
     <span x-text="$store.viz.is3d ? '2D' : '3D'"></span>
   </div>
   <div id="hint" class="panel">WASD fly · E/Q up/down · MMB orbit · Space pan · wheel dolly · click/Shift select · pill click/Shift · dblclick frame · Esc clear · F frame · Home out</div>
@@ -946,13 +968,16 @@ export async function boot() {
 
     /**
      * Resolved display name (or slug if unknown). Kicks off one-shot prefetch.
-     * Depend ONLY on _labelTick — not entityStore().rev (that re-runs hundreds
-     * of pill effects per upsert and hits m.js's effect-run cap).
+     *
+     * Under m.js v3 VDOM there is no per-binding effect subscription: any
+     * store write schedules one full-tree redraw, so we do NOT read
+     * entityStore().rev here (that would be pointless noise). Labels land via
+     * entities-store upserts (or _labelTick when only Set membership changes
+     * for the spinner). peekLabel is a plain cache read.
      */
     entityLabel(slug) {
       void this._labelTick
       if (!slug) return ''
-      // peekLabel — no rev subscribe (avoid N pills × every upsert)
       const name = peekLabel(slug)
       if (name && name !== slug) return name
       // Unknown / still the slug — one-shot resolve
@@ -963,6 +988,8 @@ export async function boot() {
     /**
      * True while a label fetch is in flight (or not yet attempted) for a slug
      * that still displays as the raw Class/id. Used for pill spinners.
+     * _labelTick exists because loading state lives in non-reactive Sets;
+     * mutating a Set does not notify the store proxy.
      */
     entityLabelLoading(slug) {
       void this._labelTick
@@ -1968,6 +1995,20 @@ export async function boot() {
   document.addEventListener('click', onEntityLink, true)
   document.addEventListener('dblclick', onEntityLinkDbl, true)
 
+  // HMR remount: drop the previous VDOM tree so the new TEMPLATE AST is used.
+  // Stores (viz/chat/entities) live in window.__M_ALPINE_STORES__ and survive.
+  // Without unmount, rootInstance keeps the old template string forever.
+  try {
+    if (M.root || document.getElementById('app')?.childNodes?.length) {
+      M.unmount()
+    }
+  } catch {
+    /* first boot — nothing to unmount */
+  }
+  // Clear any leftover DOM if unmount raced (defensive)
+  const appEl = document.getElementById('app')
+  if (appEl && appEl.childNodes.length) appEl.replaceChildren()
+
   M.mount('#app', () => ({ template: TEMPLATE }))
 
   // Entity-model → views: when a cached entity changes, rebuild inspector if
@@ -2092,18 +2133,20 @@ export async function boot() {
   // Route → scene is one-directional: Router.set / popstate / initial load all
   // land in syncRoute, which hands the slug list to the scene's apply function
   // (idempotent — re-applying the current selection is a no-op, so HMR reboots
-  // don't re-trigger the zoom). Registered AFTER M.mount on purpose: mount
-  // installs its own single-slot Router.onChange (clearInstances + full
-  // redraw, for apps whose root is Router.render()). Ours is a static template
-  // over a reactive store, so we replace that handler — store bindings already
-  // keep the DOM current, and a full re-render per navigation would only
-  // destroy input focus.
+  // don't re-trigger the zoom).
+  //
+  // Registered AFTER M.mount on purpose: mount installs a single-slot
+  // Router.onChange that clearInstances() + nulls rootInstance (correct for
+  // apps whose factory is Router.render()). Ours is ONE static template over
+  // reactive stores — route changes only write store.routeSlugs, which already
+  // schedules a coalesced VDOM redraw. Replacing that handler avoids tearing
+  // down the whole tree (and focus) on every /e/… navigation.
   const syncRoute = () => {
     const store = M.store('viz')
     store.routeSlugs = (Router.params.slugs || '').split(',').filter(Boolean).map(decodeURIComponent)
     store.api.applyEntitySelection?.(store.routeSlugs)
     // applyEntitySelection is a no-op when selection is unchanged — still refresh
-    // lime link styling against the latest routeSlugs.
+    // lime link styling against the latest routeSlugs (markdown x-html pills).
     store.syncEntityLinkSelection?.()
   }
   Router.onChange(syncRoute)
