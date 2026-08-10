@@ -37,7 +37,7 @@ export run = (argv, cwd = process.cwd()) ->
 
     when 'class'
       name = _[1]
-      throw new Error("usage: def class <Name> [--components alias:Component ...] [--top]") unless name
+      throw new Error("usage: def class <Name> [--components alias:Component ...] [--top] [--display-field alias.field] [--id-field alias.field]") unless name
       components = {}
       for spec in asArray(flags.components)
         [alias, comp] = String(spec).split(':')
@@ -46,9 +46,18 @@ export run = (argv, cwd = process.cwd()) ->
         components[alias] = comp
       def = { components }
       def.top = true if flags.top
+      if flags['display-field']?
+        def.displayField = String(flags['display-field']).trim()
+      if flags['id-field']?
+        def.idField = String(flags['id-field']).trim()
       schema.classes[name] = def
       await writeSchema(primary, schema)
-      console.log "defined class #{name}#{if def.top then ' (top-level)' else ''} with components: #{Object.keys(components).join(', ') or '(none)'}"
+      extras = []
+      extras.push('top') if def.top
+      extras.push("displayField=#{def.displayField}") if def.displayField
+      extras.push("idField=#{def.idField}") if def.idField
+      extraStr = if extras.length then " (#{extras.join(', ')})" else ''
+      console.log "defined class #{name}#{extraStr} with components: #{Object.keys(components).join(', ') or '(none)'}"
 
     when 'relation'
       [name, domain, cardinality, range] = [_[1], _[2], _[3], _[4]]

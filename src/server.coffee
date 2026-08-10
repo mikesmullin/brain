@@ -22,8 +22,9 @@
 #     a stall beats a wrong answer.
 import net from 'net'
 import { existsSync, unlinkSync, readFileSync, openSync, writeSync, closeSync } from 'fs'
+import yaml from 'js-yaml'
 import { paths } from './config.coffee'
-import { Core } from './core.coffee'
+import { Core, contentToEntity } from './core.coffee'
 
 # Read db/.lock -> { pid, started } | null.
 export readLock = (cwd) ->
@@ -469,6 +470,45 @@ export class BrainServer
       when 'schema_info' then await core.schemaInfo()
       when 'schema_graph' then await core.schemaGraphView()
       when 'validate' then await core.validateAll({ lenient: !!params.lenient })
+      # Dry-run validate one entity (no write). content = flattened YAML string or object.
+      # Parse/slug failures return { valid:false, errors } so clients can redrive LLM.
+      when 'validate_entity'
+        slug = params.slug
+        throw new Error('slug required') unless slug
+        content = params.content ? ''
+        unless typeof content is 'string'
+          content = yaml.dump(content, { lineWidth: 100, noRefs: true, sortKeys: false })
+        try
+          entity = contentToEntity(slug, content)
+        catch err
+          return { slug, valid: false, errors: [String(err.message or err)], warnings: [] }
+        res = await core.validateEntity(entity)
+        { slug: entity.slug, valid: res.valid, errors: res.errors, warnings: res.warnings }
+      # Dry-run validate several draft entities together (forward refs resolve).
+      when 'validate_entities'
+        ents = []
+        parseErrors = []
+        for item in (params.entities or [])
+          unless item?.slug
+            parseErrors.push 'entity missing slug'
+            continue
+          c = item.content ? ''
+          unless typeof c is 'string'
+            c = yaml.dump(c, { lineWidth: 100, noRefs: true, sortKeys: false })
+          try
+            ents.push contentToEntity(item.slug, c)
+          catch err
+            parseErrors.push "#{item.slug}: #{err.message or err}"
+        if parseErrors.length and not ents.length
+          return { valid: false, errors: parseErrors, warnings: [], slugs: [] }
+        res = if ents.length then await core.validateEntities(ents) else { valid: true, errors: [], warnings: [] }
+        errors = parseErrors.concat(res.errors or [])
+        {
+          valid: errors.length is 0
+          errors: errors
+          warnings: res.warnings or []
+          slugs: (e.slug for e in ents)
+        }
       # writes — pglite-first; .md is materialized by `export`
       when 'put_entity' then await core.putEntity(params.slug, params.content, !!params.overwrite)
       when 'delete_entity' then await core.deleteEntity(params.slug)

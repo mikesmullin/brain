@@ -24,20 +24,47 @@ checkScalar = (fdef, val) ->
 isSlugRef = (s) ->
   try (parseSlug(s); true) catch then false
 
+# Id must not restate the class name (Franchise/franchise-diablo, Product/product-wow).
+# Class is already the left side of Class/id — repeating it in the id is noise LLMs copy.
+idHasRedundantClassPrefix = (cls, id) ->
+  return false unless cls and id?
+  c = String(cls).toLowerCase()
+  i = String(id).toLowerCase()
+  return true if i is c
+  return true if i.startsWith("#{c}-") or i.startsWith("#{c}_")
+  false
+
+# Human-readable type label for validation messages (e.g. "string list").
+typeLabel = (fdef) ->
+  base = fdef?.type or 'value'
+  if fdef?.list then "#{base} list" else base
+
+# Optional schema comment (+ enum values) appended so LLMs get a correction guide.
+fieldGuideSuffix = (fdef) ->
+  bits = []
+  if fdef?.type is 'enum' and fdef.values?.length
+    bits.push "allowed values: #{fdef.values.join('|')}"
+  c = if fdef?.comment? then String(fdef.comment).trim() else ''
+  if c
+    # Collapse whitespace so multi-line YAML comments stay one lint line
+    bits.push "guide: #{c.replace(/\s+/g, ' ')}"
+  if bits.length then " (#{bits.join('; ')})" else ''
+
 # Validate one field's value against its definition; push errors into `errs`.
 validateField = (errs, slug, key, fdef, val, bySlug) ->
+  guide = fieldGuideSuffix(fdef)
   if fdef.list
     unless Array.isArray(val)
-      errs.push("#{slug}: #{key} must be a list")
+      errs.push("#{slug}: #{key} must be a #{typeLabel(fdef)} (got #{typeof val})#{guide}")
       return
     for item, i in val
       unless checkScalar(fdef, item)
-        errs.push("#{slug}: #{key}[#{i}] is not a valid #{fdef.type}")
+        errs.push("#{slug}: #{key}[#{i}] is not a valid #{fdef.type}#{guide}")
       else
         checkRefTarget(errs, slug, "#{key}[#{i}]", fdef, item, bySlug)
   else
     unless checkScalar(fdef, val)
-      errs.push("#{slug}: #{key} is not a valid #{fdef.type}")
+      errs.push("#{slug}: #{key} is not a valid #{typeLabel(fdef)}#{guide}")
     else
       checkRefTarget(errs, slug, key, fdef, val, bySlug)
 
@@ -65,6 +92,12 @@ export validateData = ({ schema, entities, bySlug, duplicates }, opts = {}) ->
       errors.push("#{e.slug}: unknown class '#{e.cls}'")
       continue
     fields = classFields(schema, e.cls)
+
+    # id must not echo the class name (discourages Franchise/franchise-…, Product/product-…)
+    if e.id? and idHasRedundantClassPrefix(e.cls, e.id)
+      suggest = String(e.id).replace(new RegExp("^#{e.cls}[-_]+", 'i'), '') or e.id
+      suggest = String(suggest).toLowerCase()
+      errors.push("#{e.slug}: id must not start with class name '#{e.cls}' — prefer #{e.cls}/#{suggest} (or a short token like #{e.cls}/wow), not #{e.cls}/#{String(e.cls).toLowerCase()}-…")
 
     # filename must be all-lowercase (basename + extension)
     base = if e.source then e.source.split('/').pop() else "#{e.id}.md"

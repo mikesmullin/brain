@@ -4,6 +4,13 @@
   "type": "module",
   "description": "A CWD-local knowledge-graph brain: flattened Markdown/YAML entities, ECS-style ontology schema, pglite+pgvector hybrid search, and agl-ai microagents. Successor to `ontology` (v1), inspired by gbrain.",
   "main": "src/cli.coffee",
+  "exports": {
+    ".": "./src/cli.coffee",
+    "./client": "./src/client.coffee",
+    "./config": "./src/config.coffee",
+    "./schema": "./src/schema.coffee",
+    "./slug": "./src/slug.coffee"
+  },
   "bin": {
     "brain": "./bin/brain.mjs"
   },

@@ -65,19 +65,30 @@ export class Core
   # this entity mentions — O(refs) instead of O(all entities). Whole-graph
   # lints (orphans) are excluded here; `schema orphans` covers those on demand.
   validateEntity: (entity) ->
-    targets = []
-    for own rel, ts of (entity.relations or {})
-      targets.push(t._to) for t in (ts or []) when t._to
-    for own alias, fields of (entity.components or {})
-      for own k, v of (fields or {})
-        targets.push(v) if typeof v is 'string' and v.indexOf('/') > 0
-    targets = [...new Set(targets)]
+    @validateEntities([entity])
+
+  # Validate one or more candidate entities without writing.
+  # Candidates are included in bySlug so forward refs among drafts resolve;
+  # external targets are resolved from pglite (presence only). Orphan lints skipped.
+  validateEntities: (entities) ->
+    list = (entities or []).filter (e) -> e?.slug
+    return { valid: true, errors: [], warnings: [] } unless list.length
     bySlug = {}
-    bySlug[entity.slug] = entity
+    bySlug[e.slug] = e for e in list
+    targets = []
+    for e in list
+      for own rel, ts of (e.relations or {})
+        for t in (ts or []) when t?._to and not bySlug[t._to]
+          targets.push(t._to)
+      for own alias, fields of (e.components or {})
+        for own k, v of (fields or {})
+          if typeof v is 'string' and v.indexOf('/') > 0 and not bySlug[v]
+            targets.push(v)
+    targets = [...new Set(targets)]
     if targets.length
       r = await @idx.db.query 'SELECT slug FROM entities WHERE slug = ANY($1)', [targets]
       bySlug[row.slug] = true for row in r.rows
-    res = validateData({ schema: @schema, entities: [entity], bySlug, duplicates: [] })
+    res = validateData({ schema: @schema, entities: list, bySlug, duplicates: [] })
     warnings = res.warnings.filter (m) -> not m.startsWith('orphan:')
     { valid: res.errors.length is 0, errors: res.errors, warnings }
 

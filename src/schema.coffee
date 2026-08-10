@@ -10,9 +10,10 @@
 #                 } }
 #   relations:  { <REL>: { domain, range, cardinality, qualifiers: { <name>: <FieldDef> } } }
 #
-# FieldDef: { type, required?, list?, allowedTypes?[, values?] }
+# FieldDef: { type, required?, list?, allowedTypes?[, values?][, comment?] }
 #   type in: string | bool | int | date | enum | ref | json   (date = ISO 8601 datetime)
 #   allowedTypes: [Class] (ref constraint)   values: [str] (enum constraint)
+#   comment: optional free-text guidance (e.g. enum value meanings) for UIs / NL agents
 #
 # displayField — which component field is the entity's display name (UI chips, /labels,
 # search titles). Path form is the same as idField component paths: "alias.field"
@@ -147,3 +148,94 @@ export schemaGraph = (schema, counts = null) ->
     top: (label(n) for n in topClasses(schema))
     types: (label(n) for n in classNames)
   }
+
+# ── Plain-text T-box overviews for LLMs / agents (no ANSI) ─────────────────
+# Intentionally minimal token cost — same spirit as `brain schema uniq|graph|classes`.
+# Used by tasks seed agent and available to any brain/ library consumer.
+
+# Compact overview: class names + instance counts, relation signatures, graph totals.
+# Prefer this over dumping full field catalogs into a system/user prompt.
+export compactSchemaOverview = (schema, counts = null, totals = null) ->
+  classNames = Object.keys(schema.classes or {}).sort()
+  tops = new Set(topClasses(schema))
+  relNames = Object.keys(schema.relations or {}).sort()
+  classParts = for n in classNames
+    star = if tops.has(n) then '*' else ''
+    c = if counts then formatCount(counts[n] or 0) else '?'
+    "#{n}#{star}(#{c})"
+  relParts = for n in relNames
+    r = schema.relations[n] or {}
+    d = r.domain or '*'
+    rng = r.range or '*'
+    card = r.cardinality or '?'
+    "#{n}:#{d}->#{rng}/#{card}"
+  lines = [
+    "classes (* = top-level): [#{classParts.join(', ')}]"
+    "relations: [#{relParts.join('; ')}]"
+  ]
+  if totals and typeof totals is 'object'
+    lines.push(
+      "totals: nodes=#{formatCount(totals.nodes ? 0)} " +
+      "relationships=#{formatCount(totals.relationships ? 0)} " +
+      "components=#{formatCount(totals.components ? 0)}"
+    )
+  # Optional one-line mermaid edges (helps multi-hop intuition without full schema dump)
+  if classNames.length and relNames.length and relNames.length <= 80
+    g = schemaGraph(schema, null)
+    edgeLines = (g.graph or '').split('\n').filter(Boolean)
+    if edgeLines.length and edgeLines.length <= 80
+      lines.push 'graph:'
+      lines.push("  #{e}") for e in edgeLines
+  lines.join('\n')
+
+# Single-class detail (fields + required markers) — like `brain schema classes X` without color.
+export formatClassDetail = (schema, className) ->
+  cdef = schema.classes?[className]
+  return "unknown class: #{className}" unless cdef
+  comps = schema.components or {}
+  lines = ["class: #{className}"]
+  lines.push "top: #{!!cdef.top}"
+  lines.push "idField: #{cdef.idField}" if cdef.idField
+  lines.push "displayField: #{cdef.displayField}" if cdef.displayField
+  lines.push 'components:'
+  for own alias, compName of (cdef.components or {})
+    comp = comps[compName] or {}
+    lines.push "  #{alias}: #{compName}"
+    for own fn, fd of (comp.fields or {})
+      req = if fd.required then '!' else ''
+      list = if fd.list then '[]' else ''
+      extra = ''
+      extra += " enum[#{(fd.values or []).join(',')}]" if fd.values?.length
+      extra += " ref[#{(fd.allowedTypes or []).join(',')}]" if fd.allowedTypes?.length
+      lines.push "    #{fn}:#{fd.type or 'any'}#{list}#{req}#{extra}"
+      # Optional field comment (enum semantics, usage notes) — agents should prefer these
+      if fd.comment? and String(fd.comment).trim()
+        for cl in String(fd.comment).trim().split(/\n/)
+          lines.push "      # #{cl}"
+  # Relations touching this class
+  touch = []
+  for own rn, r of (schema.relations or {})
+    if r.domain is className or r.range is className
+      touch.push "#{rn}:#{r.domain or '*'}->#{r.range or '*'}/#{r.cardinality or '?'}"
+  if touch.length
+    lines.push "relations: [#{touch.join('; ')}]"
+  lines.join('\n')
+
+# Relation detail — domain/range/cardinality/qualifiers.
+export formatRelationDetail = (schema, relName) ->
+  r = schema.relations?[relName]
+  return "unknown relation: #{relName}" unless r
+  lines = [
+    "relation: #{relName}"
+    "domain: #{r.domain or '*'}"
+    "range: #{r.range or '*'}"
+    "cardinality: #{r.cardinality or '?'}"
+  ]
+  q = r.qualifiers or {}
+  qnames = Object.keys(q)
+  if qnames.length
+    lines.push 'qualifiers:'
+    for qn in qnames
+      fd = q[qn] or {}
+      lines.push "  #{qn}: #{fd.type or 'any'}"
+  lines.join('\n')
