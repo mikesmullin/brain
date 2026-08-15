@@ -128,9 +128,43 @@ configuredBrainRoot = ->
   catch
     undefined
 
-# A selected alias points at a brain project root containing `db/`. BRAIN_ROOT
-# remains available for tests and backwards compatibility.
+# Process-local `--use <alias>` override. Never written to brains.yaml, so a
+# long-lived `brain --use ada mcp` is immune to other shells flipping `current`.
+cliUseRoot = undefined
+cliUseAlias = undefined
+
+export clearCliUseOverride = ->
+  cliUseRoot = undefined
+  cliUseAlias = undefined
+
+export getCliUseOverride = ->
+  return null unless cliUseAlias?
+  { alias: cliUseAlias, root: cliUseRoot }
+
+# Same alias rules as `brain use <alias>`, but read-only (no persist).
+# `none` and `.` mean the cwd-local db/ for this process only.
+export resolveUseAliasRoot = (alias, cwd = process.cwd()) ->
+  name = String(alias ? '').trim()
+  throw new Error('usage: brain --use <alias> <command> ...') unless name
+  if name in ['none', '.']
+    return join(resolve(cwd), 'db')
+  if name is 'current'
+    throw new Error("cannot --use reserved name 'current'")
+  brains = loadBrainsConfig()
+  unless Object.prototype.hasOwnProperty.call(brains, name) and typeof brains[name] is 'string'
+    throw new Error("unknown brain alias '#{name}' (run `brain use` to list available brains)")
+  join(resolveBrainProjectPath(brains[name]), 'db')
+
+export setCliUseOverride = (alias, cwd = process.cwd()) ->
+  cliUseAlias = String(alias).trim()
+  cliUseRoot = resolveUseAliasRoot(cliUseAlias, cwd)
+  { alias: cliUseAlias, root: cliUseRoot }
+
+# A selected alias points at a brain project root containing `db/`.
+# Precedence: --use (this process) > BRAIN_ROOT (tests / back-compat) >
+# brains.yaml `current` > cwd-local db/.
 export brainRoot = (cwd = process.cwd()) ->
+  return cliUseRoot if cliUseRoot?
   return process.env.BRAIN_ROOT if process.env.BRAIN_ROOT
   selected = configuredBrainRoot()
   return selected if selected

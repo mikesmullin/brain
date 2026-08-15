@@ -107,6 +107,7 @@ export run = (argv) ->
     usageLine 'brain use .',            "#{dim('brain use')} #{aliasC('.')}",      'register + select cwd (basename = alias)'
     usageLine 'brain use none',         "#{dim('brain use')} #{noneC('none')}",    'use the cwd-local db/'
     usageLine 'brain use --rm <alias>', "#{dim('brain use --rm')} #{aliasC('<alias>')}", 'forget a memorized alias'
+    usageLine 'brain --use <alias> <cmd>', "#{dim('brain --use')} #{aliasC('<alias>')} #{dim('<cmd>')}", 'override for one command; does not persist'
     console.log ''
     console.log label('Available brains:')
     for name, path of brains when name isnt 'current'

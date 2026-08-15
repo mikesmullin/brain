@@ -2,14 +2,16 @@
 import { readFile } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { exists, brainRoot, ensureBrainRegistered } from './config.coffee'
+import { exists, brainRoot, ensureBrainRegistered, setCliUseOverride, clearCliUseOverride } from './config.coffee'
+import { peelUseFlag } from './args.coffee'
 
 HELP = """
 🧠 Brain — knowledge-graph
-usage: brain <subcommand> [args...]
+usage: brain [--use <alias>] <subcommand> [args...]
 
 select a brain:
   use         list brains, or select one persistently
+  --use       per-command override (does not change the saved default)
 
 create your brain:
   init        scaffold new database
@@ -350,11 +352,12 @@ USAGE =
         maintenance subcommands externally (cron/crony) as needed.
 
     Examples:
-        brain server start       # run the server in the foreground (use &, tmux, or a service manager)
-        brain server status      # PID, uptime, entity/link counts, memory
-        brain server reindex     # rebuild the index in the running server
-        brain server components  # label connected components (enables O(1) no-path answers + viz color)
-        brain server stop        # graceful shutdown (clean pglite close)
+        brain server start              # run the server in the foreground (use &, tmux, or a service manager)
+        brain --use ada server start    # start a server for the `ada` alias without changing `brain use`
+        brain server status             # PID, uptime, entity/link counts, memory
+        brain server reindex            # rebuild the index in the running server
+        brain server components         # label connected components (enables O(1) no-path answers + viz color)
+        brain server stop               # graceful shutdown (clean pglite close)
   """
   viz: """
     Usage:
@@ -469,7 +472,7 @@ USAGE =
   """
   mcp: """
     Usage:
-        brain mcp
+        brain [--use <alias>] mcp
 
     Description:
         Launch the MCP server over stdio — a thin adapter over the running brain
@@ -477,8 +480,13 @@ USAGE =
         surface: search, think, ontology, graph, graphql, get_entity, put_entity,
         delete_entity, schema_methods, method_invoke, schema_orphans.
 
+        `--use <alias>` pins this MCP process to a memorized brain without
+        changing the saved `brain use` default, so a long-lived agent instance
+        stays on its database while other shells switch freely.
+
     Examples:
-        brain mcp   # serve the brain to an MCP client over stdio
+        brain mcp                 # serve the currently selected brain over stdio
+        brain --use ada mcp       # pin this process to the `ada` alias
   """
   use: """
     Usage:
@@ -500,6 +508,10 @@ USAGE =
 
         `brain use --rm <alias>` removes a memorized alias from the list
         (does not delete any files). If it was selected, current becomes none.
+
+        Per-command override (does not persist, does not change `current`):
+          brain --use <alias> <command> ...
+          brain --use none <command> ...     # cwd-local db/ for this process only
     """
 
 
@@ -544,6 +556,16 @@ showHelp = (s) -> console.log(s + '\n')
 errHelp = (s) -> console.error(s + '\n')
 
 export main = (argv) ->
+  clearCliUseOverride()
+  try
+    peeled = peelUseFlag(argv)
+    argv = peeled.argv
+    setCliUseOverride(peeled.use) if peeled.use?
+  catch err
+    console.error "error: #{err.message}"
+    process.exitCode = 1
+    return 1
+
   cmd = argv[0]
   rest = argv.slice(1)
 
@@ -580,7 +602,7 @@ export main = (argv) ->
 
   if cmd not in ['init', 'use'] and not exists()
     console.error 'fatal: brain database not found.'
-    console.error 'select a database with `brain use`, or invoke this command from a valid brain database directory.'
+    console.error 'select a database with `brain use`, pass `--use <alias>`, or invoke this command from a valid brain database directory.'
     return 1
 
   # One place for CLI / server / viz / mcp: if the resolved db/ isn't already

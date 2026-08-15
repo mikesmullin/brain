@@ -32,3 +32,26 @@ export parseArgs = (argv, opts = {}) ->
 export asArray = (v) ->
   return [] unless v?
   if Array.isArray(v) then v else [v]
+
+# Peel a global `--use <alias>` / `--use=alias` from anywhere in argv.
+# Does not persist; the dispatcher applies it via setCliUseOverride.
+# `brain use` (the persist command) is a subcommand, not this flag.
+export peelUseFlag = (argv) ->
+  out = []
+  use = undefined
+  i = 0
+  while i < argv.length
+    a = argv[i]
+    if a is '--use'
+      next = argv[i + 1]
+      if not next? or String(next).startsWith('-')
+        throw new Error('usage: brain --use <alias> <command> ...')
+      use = next
+      i++
+    else if a.startsWith('--use=')
+      use = a.slice(6)
+      throw new Error('usage: brain --use <alias> <command> ...') unless use
+    else
+      out.push(a)
+    i++
+  { argv: out, use }

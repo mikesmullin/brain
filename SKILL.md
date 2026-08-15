@@ -60,9 +60,17 @@ brain use example         # select a database named "example" (selection is pers
 brain use .               # register cwd (alias = basename; overwrites if present) and select it
 brain use --rm example    # forget a memorized alias (does not delete files)
 brain use none            # will expect a database in the cwd
+
+# Per-command override — does NOT change the saved default. Long-lived
+# processes (mcp, server) stay on this alias even if another shell runs
+# `brain use` to switch.
+brain --use ada mcp
+brain --use ada server start
+brain --use ada search "kids"
 ```
 
-Selecting an alias makes it the active brain for subsequent `brain` commands.
+Selecting an alias with `brain use` makes it the active brain for subsequent
+`brain` commands. `--use <alias>` overrides that default for one process only.
 
 ## Define the schema (T-box) — verb `def`
 
@@ -255,7 +263,8 @@ brain reindex       # rebuild the pglite index + embeddings from .md
 ## MCP server
 
 ```sh
-brain mcp           # stdio MCP server
+brain mcp                 # stdio MCP server (currently selected brain)
+brain --use ada mcp       # pin this process to the `ada` alias
 ```
 
 Exposes tools: `search`, `think`, `ontology`, `graph`, `graphql`, `get_entity`, `put_entity`,

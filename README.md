@@ -52,6 +52,7 @@ Run a CLI query:
 bun install && bun link          # register the global `brain` command
 brain init && brain reindex && brain server start &
 brain search "anything"          # also: think · ontology · graph · graphql
+brain --use ada search "kids"    # pin one command to an alias; does not change `brain use`
 ```
 
 Load the playground dataset (the [Panama Papers](docs/BENCHMARK.md) — 2M nodes, 2.9M edges):
