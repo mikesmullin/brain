@@ -188,7 +188,7 @@ export think = (core, question, opts = {}) ->
     question: question
   throw new Error('cancelled by user') if opts.isCancelled?()
   effort = opts.reasoning_effort or opts.reasoningEffort or 'medium'
-  nestedMaxTurns = Number(opts.max_turns or process.env.ADA_MAX_TURNS or process.env.BRAIN_MAX_TURNS)
+  nestedMaxTurns = Number(opts.max_turns or process.env.BRAIN_MAX_TURNS)
   agent = await Agent.factory
     model: model
     # stream: cancellation only works promptly over SSE — LM Studio ignores a

@@ -101,7 +101,7 @@ export ontologyQuery = (core, question, opts = {}) ->
     thinking: opts.thinking
     reasoning_effort: effort
 
-  nestedMaxTurns = Number(opts.max_turns or process.env.ADA_MAX_TURNS or process.env.BRAIN_MAX_TURNS)
+  nestedMaxTurns = Number(opts.max_turns or process.env.BRAIN_MAX_TURNS)
   agent = await Agent.factory
     model: model
     stream: true   # prompt cancellation: see think.coffee — SSE abort frees the LM Studio slot
