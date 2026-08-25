@@ -101,6 +101,7 @@ export ontologyQuery = (core, question, opts = {}) ->
     thinking: opts.thinking
     reasoning_effort: effort
 
+  nestedMaxTurns = Number(opts.max_turns or process.env.ADA_MAX_TURNS or process.env.BRAIN_MAX_TURNS)
   agent = await Agent.factory
     model: model
     stream: true   # prompt cancellation: see think.coffee — SSE abort frees the LM Studio slot
@@ -108,6 +109,7 @@ export ontologyQuery = (core, question, opts = {}) ->
     system_prompt: system
     parallel_tools: true
     reasoning_effort: effort
+    ...(if Number.isFinite(nestedMaxTurns) and nestedMaxTurns >= 1 then { max_turns: Math.floor(nestedMaxTurns) } else {})
     output_tool:
       name: 'final_answer'
       description: 'Report the final answer with the resolved entity slugs.'

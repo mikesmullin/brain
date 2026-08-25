@@ -21,6 +21,7 @@
 #     queries WAIT for it to finish rather than reading a partial index —
 #     a stall beats a wrong answer.
 import net from 'net'
+import { spawn } from 'node:child_process'
 import { existsSync, unlinkSync, readFileSync, openSync, writeSync, closeSync } from 'fs'
 import yaml from 'js-yaml'
 import { paths } from './config.coffee'
@@ -527,3 +528,37 @@ export class BrainServer
 
 export startServer = (cwd = process.cwd()) ->
   await new BrainServer(cwd).start()
+
+sleep = (ms) -> new Promise (r) -> setTimeout r, ms
+
+# Re-invoke this CLI as a detached `brain [--use alias] server start`.
+# Used by MCP (and anyone else) so a tool call can bring the pglite owner up
+# without this process becoming the server.
+brainCliForSpawn = ->
+  extra = []
+  i = process.argv.indexOf '--use'
+  extra = ['--use', process.argv[i + 1]] if i >= 0 and process.argv[i + 1]
+  entry = process.argv[1]
+  if entry and /brain/i.test(String(entry))
+    { cmd: process.execPath, args: [entry, extra..., 'server', 'start'] }
+  else
+    { cmd: 'brain', args: [extra..., 'server', 'start'] }
+
+# If no live server (PID + sock), spawn `brain server start` and wait.
+# Returns true when serverRunning(cwd). Safe to call on every tool.
+export ensureServerRunning = (cwd = process.cwd(), opts = {}) ->
+  return true if serverRunning(cwd)
+  timeoutMs = Number(opts.timeoutMs) or 30000
+  { cmd, args } = brainCliForSpawn()
+  console.error "brain server: not running, auto-starting (#{cmd} #{args.join ' '}) cwd=#{cwd}"
+  child = spawn cmd, args,
+    cwd: cwd
+    env: process.env
+    detached: true
+    stdio: 'ignore'
+  child.unref()
+  deadline = Date.now() + timeoutMs
+  while Date.now() < deadline
+    return true if serverRunning(cwd)
+    await sleep 200
+  false
