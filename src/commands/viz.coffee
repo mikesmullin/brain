@@ -82,12 +82,8 @@ export run = (argv, cwd = process.cwd()) ->
   if existsSync(dbConfigPath)
     raw = yaml.load(await readFile(dbConfigPath, 'utf-8')) or {}
     models = raw.models if Array.isArray(raw.models) and raw.models.length
-  # FAV_LOCAL_LLM (env): the user's preferred local model — auto-included at
-  # the head of the roster, so it wins as the first-startup default (a
-  # localStorage-persisted pick still takes precedence client-side). Deduped
-  # in case the roster already lists the same spec.
-  fav = (process.env.FAV_LOCAL_LLM or '').trim()
-  models = [fav, models...] if fav
+  # Empty string in the roster means "let AGL pick" (~/.config/agl/config.yaml
+  # default_model, re-read on every inference). Deduped.
   models = Array.from(new Set(models))
 
   vizDir = join(paths(cwd).root, 'viz')
