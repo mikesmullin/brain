@@ -11,6 +11,8 @@ import yaml from 'js-yaml'
 import { request, requestStream, serverRunning, noServerError } from './client.coffee'
 import { ensureServerRunning } from './server.coffee'
 import { attachQueryAdvice } from './mcp-advice.mjs'
+import { loadSchema, formatClassDetail } from './schema.coffee'
+import { storageDirs } from './config.coffee'
 
 TOOLS = [
   {
@@ -68,7 +70,7 @@ TOOLS = [
   }
   {
     name: 'put_entity'
-    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Writes land in the live index immediately (searchable at once); schema validation is reported as soft issues, not a hard error (overwrite=true to replace an existing record). The .md file materializes on `brain export`.'
+    description: 'Create/update an entity. `content` is flattened YAML frontmatter (lowercase keys = components, UPPERCASE keys = relations). Writes land in the live index immediately (searchable at once); schema validation is reported as soft issues, not a hard error (overwrite=true to replace an existing record). When invalid, the result includes the valid shape for the class — fix and retry. The .md file materializes on `brain export`.'
     inputSchema:
       type: 'object'
       properties:
@@ -116,8 +118,10 @@ textResult = (obj) -> { content: [{ type: 'text', text: (if typeof obj is 'strin
 errorResult = (msg) -> { content: [{ type: 'text', text: msg }], isError: true }
 
 # Agent-facing put_entity outcome: always "saved" when write succeeded; invalid
-# schema is a soft notice, not isError.
-formatPutEntityResult = (r) ->
+# schema is a soft notice, not isError. On invalid, the notice encourages a
+# retry AND includes the valid shape for the entity's class (from schema.yaml)
+# so the next attempt can be right first time.
+formatPutEntityResult = (r, ctx = {}) ->
   base =
     slug: r.slug
     valid: r.valid isnt false
@@ -125,13 +129,20 @@ formatPutEntityResult = (r) ->
   if r.valid isnt false
     return base
   reasons = r.validationErrors or []
-  notice = [
+  lines = [
     "Record was stored in the live index, but it is considered INVALID for the following reasons:"
     (reasons.map (m) -> "  - #{m}").join('\n') or '  - (unspecified validation errors)'
     ''
-    'Fixing these is not mandatory for the data to be stored and persisted.'
-    'If you can, try an update (overwrite=true) with corrected content so the record becomes valid.'
-  ].join('\n')
+    'Please try again with corrected content (overwrite=true). Valid shape for this class:'
+  ]
+  cls = String(ctx.slug or r.slug or '').split('/')[0] or 'unknown'
+  try
+    dirs = await storageDirs ctx.cwd or process.cwd()
+    schema = await loadSchema dirs
+    lines.push '', formatClassDetail(schema, cls)
+  catch e
+    lines.push '', "(could not load schema detail here: #{e.message} — try `schema classes #{cls}`)"
+  notice = lines.join('\n')
   Object.assign base,
     valid: false
     validation_errors: reasons
@@ -153,7 +164,7 @@ handleCall = (cwd, name, args) ->
     when 'get_entity'
       textResult(await request(cwd, 'get_entity', { slug: args.slug, include_links: !!args.include_links }))
     when 'put_entity'
-      textResult(formatPutEntityResult(await request(cwd, 'put_entity', { slug: args.slug, content: args.content, overwrite: !!args.overwrite })))
+      textResult(await formatPutEntityResult(await request(cwd, 'put_entity', { slug: args.slug, content: args.content, overwrite: !!args.overwrite }), { cwd, slug: args.slug }))
     when 'delete_entity'
       textResult(await request(cwd, 'delete_entity', { slug: args.slug }))
     when 'schema_methods'
