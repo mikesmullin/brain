@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use tokio_postgres::NoTls;
 
 use crate::abox::{Edge, Entity};
