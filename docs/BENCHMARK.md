@@ -384,7 +384,13 @@ landed on a different node. It is reported rather than dropped.
 |---|---|---|
 | ETL (zip → 2M `.md`) | 99.7 s | 141 s |
 | `reindex --no-embed` | 447 s, **19.4 GB peak RSS** | **104.5 s**, no measured peak |
+| `server components` (connected components) | 204 s | **14.8 s** — 33,426 components |
 | index on disk | — | 3.9 GB (one PostgreSQL schema) |
+
+Labelling components is **13.8× faster**, and it buys what it was built for: a
+shortest-path query between two nodes in different components now answers in
+**1 ms having visited 0 nodes**, because the answer is a comparison of two
+integers rather than a search.
 
 The reindex is **4.3× faster** and no longer has a memory ceiling to worry
 about: v1 held 2M entity objects and all rows in one WASM heap, v2 parses in

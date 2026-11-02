@@ -683,6 +683,8 @@ brain --use ada mcp      <span class="c"># pin this process to one brain, whatev
           <tr><td>Shortest path, 1-hop target</td><td>64 ms</td><td>51 ms</td><td><b>4.1 ms</b></td></tr>
           <tr><td>Text search ("Mossack", ranked top-20)</td><td>601 ms</td><td>430 ms</td><td><b>193 ms</b></td></tr>
           <tr><td>Index build (<code>reindex --no-embed</code>)</td><td>447 s, 19.4 GB peak</td><td><b>105 s</b></td><td>52–90 s (<code>graph.build</code>)</td></tr>
+          <tr><td>Connected components (33,426 of them)</td><td>204 s</td><td><b>14.8 s</b></td><td>420–448 ms (<code>component_stats</code>)</td></tr>
+          <tr><td>…and the no-path answer it buys</td><td colspan="3"><b>1 ms, 0 nodes visited</b> — two integers compared, not a search</td></tr>
         </tbody>
       </table>
       <p class="muted">Full methodology, parity caveats, every attempted optimisation and its measurement: <a href="BENCHMARK.md">docs/BENCHMARK.md</a>. Reproduce with <code>brain bench panama-etl</code> then <code>brain bench panama</code>.</p>
