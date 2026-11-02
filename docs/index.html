@@ -188,7 +188,7 @@
 
       <div class="callout why"><p><span class="lbl">Does the graph pay for itself?</span> On an adversarial benchmark seeded with stale facts and paraphrased "semantic poison," a full typed-graph brain hit <strong>~49% precision@5 vs ~11% for vector-RAG</strong> — a <strong>+31-point</strong> jump from the graph layer alone, while returning <strong>53% less</strong> total payload. Typed graph hits resolve exact relational and chronological facts <em>before</em> similarity ever runs — a task pure vectors structurally cannot do: knowing which fact is still current.</p></div>
 
-      <p><b>brain</b> is all four layers in one cwd-local tool: plain Markdown files (like a local-first wiki), a pglite vector index, a typed relation graph, and an ontology schema that every write is checked against.</p>
+      <p><b>brain</b> is all four layers in one cwd-local tool: plain Markdown files (like a local-first wiki), a PostgreSQL keyword + vector index, a typed relation graph, and an ontology schema that every write is checked against.</p>
     </section>
 
     <hr class="div">
@@ -303,7 +303,7 @@ brain link Team/atlas USES_SYSTEM System/ledger reason=<span class="s">"core dep
 
       <h3><span class="pill b">3</span> Validate, index, serve, and ask</h3>
       <pre><button class="copy">copy</button><code>brain validate     <span class="c"># schema + lint check of every entity (exit 1 on error)</span>
-brain reindex      <span class="c"># rebuild the pglite index + embeddings from the .md files</span>
+brain reindex      <span class="c"># rebuild the index + embeddings from the .md files</span>
 brain server start &amp;                        <span class="c"># serve queries from the resident index</span>
 brain get Team/atlas --links               <span class="c"># read it back, incoming edges too</span>
 brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>   <span class="c"># find every such edge</span></code></pre>

@@ -39,7 +39,11 @@ fn tools() -> Value {
       {"name":"schema","description":"The T-box: classes, components, relations, and the OWL axioms on them.",
        "inputSchema":{"type":"object","properties":{"format":{"type":"string","enum":["json","turtle","tsv"]}}}},
       {"name":"validate","description":"Schema + lint findings for every entity.",
-       "inputSchema":{"type":"object","properties":{"errors_only":{"type":"boolean"}}}}
+       "inputSchema":{"type":"object","properties":{"errors_only":{"type":"boolean"}}}},
+      {"name":"schema_methods","description":"The component methods callable on a class — name, description and typed parameters.",
+       "inputSchema":{"type":"object","properties":{"class":{"type":"string"}}}},
+      {"name":"method_invoke","description":"Invoke a component method on an entity. A validated, typed write path: the method decides what changes, so a malformed date or a broken list cannot be written.",
+       "inputSchema":{"type":"object","properties":{"slug":{"type":"string"},"method":{"type":"string"},"params":{"type":"object"}},"required":["slug","method"]}}
     ])
 }
 
@@ -196,6 +200,30 @@ async fn handle(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             .take(500).map(|x| format!("{x}")).collect::<Vec<_>>()
                     }))
                 }
+                "schema_methods" => {
+                    let classes: Vec<String> = match a["class"].as_str() {
+                        Some(c) => vec![ctx.tbox.resolve_class(c).unwrap_or(c).to_string()],
+                        None => ctx.tbox.classes.keys().cloned().collect(),
+                    };
+                    let mut out = Vec::new();
+                    for cls in classes {
+                        for (alias, comp, m) in crate::ecs::methods_of(ctx, &cls)? {
+                            out.push(json!({ "class": cls, "alias": alias, "component": comp,
+                                             "name": m["name"], "description": m["description"],
+                                             "parameters": m["parameters"], "required": m["required"] }));
+                        }
+                    }
+                    text(json!({ "methods": out }))
+                }
+                "method_invoke" => text(
+                    crate::ecs::invoke(
+                        ctx,
+                        a["slug"].as_str().unwrap_or(""),
+                        a["method"].as_str().unwrap_or(""),
+                        a.get("params").cloned().unwrap_or(json!({})),
+                    )
+                    .await?,
+                ),
                 other => anyhow::bail!("unknown tool: {other}"),
             }
         }

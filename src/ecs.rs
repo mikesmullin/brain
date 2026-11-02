@@ -254,24 +254,11 @@ pub fn print_methods(ctx: &Ctx, which: Option<&str>) -> Result<i32> {
 
 // ── call ────────────────────────────────────────────────────────────────────
 
-pub async fn call(ctx: &Ctx, argv: &[String]) -> Result<i32> {
-    let a = Args::parse(argv, &[]);
-    if a.positional.len() < 2 {
-        bail!("usage: call");
-    }
-    let canonical = ctx.resolve_slug(&a.positional[0]).await?;
-    let method = a.positional[1].clone();
-    // params are YAML flow, outer braces optional, exactly as v1
-    let params: Value = match a.positional.get(2) {
-        None => Value::Object(Map::new()),
-        Some(p) => {
-            let text = p.trim();
-            let wrapped = if text.starts_with('{') { text.to_string() } else { format!("{{{text}}}") };
-            let y: serde_yaml::Value = serde_yaml::from_str(&wrapped).context("parsing params (YAML flow)")?;
-            abox::yaml_to_json(&y)
-        }
-    };
-
+/// Invoke a method and return its result. Prints nothing: MCP speaks JSON-RPC
+/// on stdout, so a stray `println!` in here corrupts the protocol — which it
+/// did, until `method_invoke` was added and immediately proved it.
+pub async fn invoke(ctx: &Ctx, slug: &str, method: &str, params: Value) -> Result<Value> {
+    let canonical = ctx.resolve_slug(slug).await?;
     let s = slug::parse(&canonical)?;
     let path = ctx.brain.db_root.join(&s.cls).join(format!("{}.md", s.id));
     let mut e = abox::read_entity(&s.cls, &s.id, &path)?;
@@ -284,7 +271,7 @@ pub async fn call(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         let r = run_shim(&ctx.brain.project_root, &req)?;
         let has = r["methods"]
             .as_array()
-            .map(|a| a.iter().any(|m| m["name"].as_str() == Some(method.as_str())))
+            .map(|a| a.iter().any(|m| m["name"].as_str() == Some(method)))
             .unwrap_or(false);
         if has {
             found = Some((alias.clone(), module));
@@ -302,14 +289,39 @@ pub async fn call(ctx: &Ctx, argv: &[String]) -> Result<i32> {
     });
     let r = run_shim(&ctx.brain.project_root, &req)?;
     if r["ok"].as_bool() != Some(true) {
-        eprintln!("error: {}", r["error"].as_str().unwrap_or("the method failed"));
-        return Ok(1);
+        bail!("{}", r["error"].as_str().unwrap_or("the method failed"));
     }
     if let Some(ent) = r.get("entity") {
         apply_entity_json(&mut e, ent);
         e.write(&ctx.brain.db_root)?;
         ctx.store.upsert(&e).await?;
     }
+    Ok(json!({ "ok": true, "slug": canonical, "method": method, "content": r.get("content") }))
+}
+
+/// `brain call` — [`invoke`], then print.
+pub async fn call(ctx: &Ctx, argv: &[String]) -> Result<i32> {
+    let a = Args::parse(argv, &[]);
+    if a.positional.len() < 2 {
+        bail!("usage: call");
+    }
+    // params are YAML flow, outer braces optional, exactly as v1
+    let params: Value = match a.positional.get(2) {
+        None => Value::Object(Map::new()),
+        Some(p) => {
+            let text = p.trim();
+            let wrapped = if text.starts_with('{') { text.to_string() } else { format!("{{{text}}}") };
+            let y: serde_yaml::Value = serde_yaml::from_str(&wrapped).context("parsing params (YAML flow)")?;
+            abox::yaml_to_json(&y)
+        }
+    };
+    let r = match invoke(ctx, &a.positional[0], &a.positional[1], params).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(1);
+        }
+    };
     match r.get("content") {
         Some(Value::String(t)) => println!("{t}"),
         Some(Value::Null) | None => {}
