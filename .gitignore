@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+# rebuildable artifacts
+/tmp/
+*.trace.jsonl
+# datasets (big, regenerable)
+/bench/datasets/
+# the pinned wasm-bindgen CLI, fetched by dev.sh
+/tools/
+# generated wasm bundle
+/web/pkg/

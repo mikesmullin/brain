@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = ["app"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+
+# The wasm frontend's profile. Copied from rustex1's workspace root because the
+# dev server builds the wasm half from *this* root, so the profile has to exist
+# here. (vendor/rustex1/docs/RUST_M_JS.md)
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+debug = false
+strip = "debuginfo"
+codegen-units = 16
+lto = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[package]
+name = "brain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.80"
+description = "A knowledge-graph brain: Markdown/YAML entities, an OWL-flavoured ECS ontology, PostgreSQL hybrid search, and a graph-crawling answerer."
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "signal", "time", "process", "sync"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+deadpool-postgres = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+walkdir = "2"
+rayon = "1"
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+csv = "1"
+futures-util = "0.3"
+bytes = "1"
+# the web surface: static roots, the /__m_hmr socket, the watcher, the wasm
+# rebuild and the self-restart all come from here
+rustex1-devserver = { path = "vendor/rustex1/devserver" }

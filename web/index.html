@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- the router overwrites this on navigation; matching the shape it writes
+         avoids a flash of the old title on first paint -->
+    <title>brain</title>
+    <meta name="description" content="A knowledge graph you can read." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🧠</text></svg>" />
+    <!-- the rustex1 kit skin, then this app's own type and colour -->
+    <link rel="stylesheet" href="/kit.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- m-js owns everything inside #app; the wasm owns m-js -->
+    <div id="app"></div>
+
+    <script type="module" data-hmr-entry src="/app.mjs"></script>
+  </body>
+</html>

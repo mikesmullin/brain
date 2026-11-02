@@ -1,0 +1,23 @@
+{
+  "name": "brain",
+  "port": 4321,
+  "app": {
+    "package": "brain-app",
+    "lib": "brain_app",
+    "profile": "wasm",
+    "watch": [
+      "app",
+      "vendor/rustex1/kit"
+    ]
+  },
+  "server": {
+    "package": "brain",
+    "watch": [
+      "src",
+      "vendor/rustex1/devserver"
+    ]
+  },
+  "static": [
+    "web"
+  ]
+}

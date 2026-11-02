@@ -1,0 +1,14 @@
+[package]
+name = "brain-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "brain's wiki frontend — Rust → wasm on the rustex1 kit"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustex1-kit = { path = "../vendor/rustex1/kit" }
+wasm-bindgen = "=0.2.129"
+js-sys = "=0.3.106"

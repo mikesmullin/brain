@@ -1,0 +1,223 @@
+/* brain — wiki. A dark reading surface first: the long text on these pages is
+   an entity's own prose, so the type scale and measure are set for reading a
+   paragraph, not for packing a dashboard. */
+
+/* The kit skin (kit.css) loads first and styles generic form elements and the
+   page background for its own dev panel. Everything below is the wiki's own
+   surface, and where the two disagree this file is the one that wins because
+   it is linked second. */
+
+:root {
+  --bg:        #0d1016;
+  --bg-raised: #141922;
+  --bg-sunken: #0a0d12;
+  --line:      #222b38;
+  --line-soft: #1a212b;
+  --ink:       #d8dee9;
+  --ink-dim:   #8e9bb0;
+  --ink-faint: #5d6880;
+  --accent:    #7cc4ff;
+  --accent-dim:#2a5d85;
+  --warm:      #ffb86b;
+  --good:      #8ddb9a;
+  --radius: 8px;
+  --measure: 72ch;
+  --serif: ui-serif, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Inter, Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16.5px/1.65 var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+/* ── chrome ──────────────────────────────────────────────────────────────── */
+
+header.bar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 14px;
+  padding: 11px 20px;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  display: flex; align-items: baseline; gap: 9px;
+  font: 600 16px/1 var(--sans); letter-spacing: -0.01em;
+  color: var(--ink); white-space: nowrap;
+}
+.brand .glyph { font-size: 19px; }
+.brand .onto { color: var(--ink-faint); font-weight: 400; font-size: 13px; }
+
+form.search { display: flex; flex: 1; gap: 8px; min-width: 0; }
+form.search input {
+  flex: 1 1 0; width: auto; min-width: 0;
+  padding: 9px 13px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font: 400 15px/1.3 var(--sans);
+}
+form.search input::placeholder { color: var(--ink-faint); }
+form.search input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 12%, transparent);
+}
+/* kit.css sets `select { width: 100% }` for its form widgets, which in a flex
+   row makes the mode selector claim the whole bar and squeezes the query field
+   to nothing. The search bar is not a form widget stack, so both controls are
+   sized explicitly here rather than inheriting that rule. */
+form.search select, form.search button {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 9px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-dim);
+  font: 400 13px/1.3 var(--sans);
+  cursor: pointer;
+}
+form.search button { color: var(--ink); }
+form.search button:hover, form.search select:hover { border-color: var(--accent-dim); }
+
+/* ── layout ──────────────────────────────────────────────────────────────── */
+
+main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 96px; }
+.cols { display: grid; grid-template-columns: minmax(0,1fr) 272px; gap: 40px; align-items: start; }
+@media (max-width: 880px) { .cols { grid-template-columns: minmax(0,1fr); } aside { order: -1; } }
+
+aside { position: sticky; top: 76px; font-size: 14px; }
+aside h3 {
+  margin: 0 0 9px; font: 600 11px/1 var(--sans);
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-faint);
+}
+aside .box {
+  padding: 13px 15px; margin-bottom: 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+aside ul { margin: 0; padding: 0; list-style: none; }
+aside li { display: flex; justify-content: space-between; gap: 10px; padding: 2.5px 0; }
+aside li .n { color: var(--ink-faint); font: 400 12.5px/1.6 var(--mono); }
+
+/* ── reading page ────────────────────────────────────────────────────────── */
+
+article { max-width: var(--measure); }
+article > header { margin-bottom: 26px; }
+.kicker {
+  font: 500 11.5px/1 var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); margin-bottom: 8px;
+}
+h1 {
+  margin: 0 0 6px;
+  font: 600 clamp(28px, 4.4vw, 40px)/1.14 var(--serif);
+  letter-spacing: -0.015em;
+}
+.slug { font: 400 12.5px/1 var(--mono); color: var(--ink-faint); }
+
+h2 {
+  margin: 36px 0 13px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line-soft);
+  font: 600 13px/1 var(--sans);
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-dim);
+}
+
+.prose { font-family: var(--serif); font-size: 17.5px; line-height: 1.72; }
+.prose p { margin: 0 0 1.05em; }
+
+dl.fields { margin: 0; display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 7px 20px; }
+dl.fields dt {
+  font: 400 13px/1.5 var(--mono); color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+dl.fields dd { margin: 0; overflow-wrap: anywhere; }
+dl.fields dd.long { font-family: var(--serif); font-size: 16.5px; line-height: 1.6; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  padding: 1.5px 8px; border-radius: 99px;
+  background: var(--bg-sunken); border: 1px solid var(--line-soft);
+  font: 400 12.5px/1.6 var(--sans); color: var(--ink-dim);
+}
+
+.rel { margin-bottom: 15px; }
+.rel .name {
+  font: 500 12.5px/1.6 var(--mono); color: var(--warm);
+}
+.rel .name.in { color: var(--ink-faint); }
+.rel ul { margin: 4px 0 0; padding: 0 0 0 1px; list-style: none; }
+.rel li { padding: 1.5px 0; }
+.rel .qual { color: var(--ink-faint); font: 400 12px/1.6 var(--mono); }
+
+/* ── SERP ────────────────────────────────────────────────────────────────── */
+
+.answer {
+  padding: 18px 20px; margin-bottom: 30px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent) 7%, var(--bg-raised)), var(--bg-raised));
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius);
+}
+.answer .label {
+  font: 500 11px/1 var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent); margin-bottom: 9px;
+}
+.answer .text { font-family: var(--serif); font-size: 18px; line-height: 1.6; }
+.answer .cites { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.answer .meta { margin-top: 11px; font: 400 12px/1.5 var(--mono); color: var(--ink-faint); }
+
+.hit { padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
+.hit .path { font: 400 12px/1.5 var(--mono); color: var(--ink-faint); }
+.hit .title { font: 500 18px/1.3 var(--sans); margin: 1px 0 3px; }
+.hit .snippet { color: var(--ink-dim); font-size: 14.5px; line-height: 1.55; }
+.hit .via { color: var(--ink-faint); font: 400 11.5px/1.5 var(--mono); }
+
+pre {
+  margin: 0; padding: 14px 16px; overflow-x: auto;
+  background: var(--bg-sunken); border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  font: 400 13px/1.6 var(--mono); color: var(--ink-dim);
+}
+
+.empty { padding: 40px 0; color: var(--ink-faint); text-align: center; }
+.spinner { padding: 40px 0; color: var(--ink-faint); text-align: center; font: 400 14px/1 var(--mono); }
+.err {
+  padding: 13px 16px; border-radius: var(--radius);
+  background: color-mix(in oklab, #ff5f5f 10%, var(--bg-raised));
+  border: 1px solid color-mix(in oklab, #ff5f5f 35%, var(--line));
+  font: 400 13.5px/1.5 var(--mono);
+}
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 11px; }
+.card {
+  display: block; padding: 13px 15px;
+  background: var(--bg-raised); border: 1px solid var(--line-soft);
+  border-radius: var(--radius); color: var(--ink);
+}
+.card:hover { border-color: var(--accent-dim); text-decoration: none; }
+.card .n { color: var(--ink-faint); font: 400 12.5px/1.6 var(--mono); }
+.card .t { font: 500 15.5px/1.3 var(--sans); }
+
+.lede { max-width: var(--measure); color: var(--ink-dim); font-family: var(--serif); font-size: 17px; line-height: 1.65; }
+.stats { display: flex; gap: 22px; flex-wrap: wrap; margin: 18px 0 30px; }
+.stats div { font: 400 13px/1.5 var(--mono); color: var(--ink-faint); }
+.stats b { display: block; color: var(--ink); font: 600 22px/1.2 var(--sans); }
+
+/* ── the kit's dev panel sits on top of all this; keep it out of the way ──── */
+body { background: var(--bg) !important; color: var(--ink); }
+#app { min-height: 100vh; }

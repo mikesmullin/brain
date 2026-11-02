@@ -1,0 +1,3 @@
+[submodule "vendor/rustex1"]
+	path = vendor/rustex1
+	url = /workspace/rustex1
