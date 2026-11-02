@@ -119,10 +119,6 @@ impl Entity {
         }
     }
 
-    pub fn edge_count(&self) -> usize {
-        self.relations.values().map(|v| v.len()).sum()
-    }
-
     /// Union `other` into `self`: incoming scalars win, edges union by target.
     pub fn merge(&mut self, other: Entity) {
         for (alias, fields) in other.components {
@@ -269,10 +265,21 @@ fn parse_edges(v: &serde_yaml::Value) -> Result<Vec<Edge>> {
         serde_yaml::Value::Null => return Ok(vec![]),
         one => vec![one],
     };
-    let mut out = Vec::with_capacity(items.len());
+    // Dedupe by target within one relation. A repeated edge is not
+    // information, and it is also what makes `(from_slug, rel, to_slug)` a key:
+    // the index carries a unique constraint so an interactive write can use
+    // ON CONFLICT, and a duplicate can only ever arrive from one entity's own
+    // file. The ICIJ relationship table has 435,267 of them.
+    let mut out: Vec<Edge> = Vec::with_capacity(items.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for it in items {
         match it {
-            serde_yaml::Value::String(s) => out.push(Edge::plain(s.trim())),
+            serde_yaml::Value::String(s) => {
+                let t = s.trim();
+                if seen.insert(t.to_lowercase()) {
+                    out.push(Edge::plain(t));
+                }
+            }
             serde_yaml::Value::Mapping(_) => {
                 let json = yaml_to_json(it);
                 let Value::Object(m) = json else { continue };
@@ -287,12 +294,16 @@ fn parse_edges(v: &serde_yaml::Value) -> Result<Vec<Edge>> {
                     .into_iter()
                     .filter(|(k, _)| k != "_to")
                     .collect::<BTreeMap<String, Value>>();
-                out.push(Edge { to, qualifiers });
+                if seen.insert(to.to_lowercase()) {
+                    out.push(Edge { to, qualifiers });
+                }
             }
             other => {
                 let json = yaml_to_json(other);
                 if let Some(s) = json.as_str() {
-                    out.push(Edge::plain(s));
+                    if seen.insert(s.to_lowercase()) {
+                        out.push(Edge::plain(s));
+                    }
                 }
             }
         }

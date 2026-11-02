@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>brain — Documentation</title>
-<meta name="description" content="brain — a cwd-local knowledge-graph for agents. Typed Markdown entities, an ECS ontology, a resident server with millisecond queries at 2M+ nodes, hybrid search, deterministic graph traversal, a real-time WebGL explorer, and MCP tools. The write → maintain → retrieve → use memory lifecycle, made concrete.">
+<title>brain v2 — Documentation</title>
+<meta name="description" content="brain v2 — a knowledge graph that lives in your repo. Typed Markdown entities, an OWL-flavoured ECS ontology, one shared PostgreSQL index, six ways to ask — including crawl, which answers a question in words by walking the real graph one typed decision at a time — a Rust→wasm wiki, and MCP tools.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -35,7 +35,8 @@
     <div class="nav-group">
       <div class="nav-title">Get going</div>
       <a class="nav-link" href="#quickstart">Quick start</a>
-      <a class="nav-link" href="#server">The server</a>
+      <a class="nav-link" href="#database">The database</a>
+      <a class="nav-link" href="#server">The server (optional)</a>
       <a class="nav-link" href="#first-brain">Build your first brain</a>
     </div>
 
@@ -58,13 +59,14 @@
 
     <div class="nav-group">
       <div class="nav-title">Asking questions</div>
-      <a class="nav-link" href="#query">Five query modes</a>
+      <a class="nav-link" href="#query">Six query modes</a>
+      <a class="nav-link" href="#crawl">crawl <span class="g">· default</span></a>
       <a class="nav-link" href="#search">search</a>
       <a class="nav-link" href="#think">think</a>
       <a class="nav-link" href="#ontology">ontology</a>
       <a class="nav-link" href="#graph">graph</a>
       <a class="nav-link" href="#graphql">graphql</a>
-      <a class="nav-link" href="#viz">viz: the explorer</a>
+      <a class="nav-link" href="#web">web: the wiki</a>
     </div>
 
     <div class="nav-group">
@@ -75,6 +77,7 @@
 
     <div class="nav-group">
       <div class="nav-title">Reference</div>
+      <a class="nav-link" href="#migrate">Migrating from v1</a>
       <a class="nav-link" href="#benchmark">Benchmark: 2M nodes</a>
       <a class="nav-link" href="#layout">Layout &amp; config</a>
       <a class="nav-link" href="#cli">CLI cheat-sheet</a>
@@ -91,6 +94,7 @@
       <img class="logo" src="brain-logo.png" alt="brain">
       <p class="tagline">A knowledge graph that lives in <span class="g">your repo</span> —<br>typed, searchable, and hard to <span class="b">corrupt</span>.</p>
       <p class="sub">Pile enough notes, docs, and facts into a folder and eventually you want to <em>ask questions</em> of them — "which on-call engineer supports the payments service?" — not just grep for keywords. <b>brain</b> stores a typed knowledge graph as plain Markdown on disk, validates every write against a schema, and lets you search, traverse, and reason over it from the CLI or over MCP.</p>
+      <p class="sub"><b>v2</b> is the same idea in Rust, on a real PostgreSQL, with a sixth way to ask: <a href="#crawl"><code>crawl</code></a> takes a question in plain words and walks the graph to answer it — one typed decision per hop, over options the engine has already fetched, so a path it reports is a path that exists.</p>
       <div class="cta">
         <a class="btn green" href="#quickstart">🚀 Quick start</a>
         <a class="btn blue" href="#first-brain">🧩 Build your first brain</a>
@@ -101,7 +105,8 @@
     <div class="grid cols-2" style="align-items:center; margin-top:24px;">
       <div>
         <p class="lead">A vector store hands back fuzzy text with no structure. A raw LLM agent let loose on your files invents duplicates and schema-invalid junk. A hosted knowledge base drags your data into someone else's cloud. You end up with either <strong>no structure</strong> or <strong>no trust</strong>.</p>
-        <p><b>brain</b> gives you both. Structure comes from an <a href="#tbox">entity-component-system ontology</a>; trust comes from the fact that <strong>every write — CLI <em>or</em> MCP — is validated against that schema</strong>, so the graph can't drift into inconsistency. Queries run against an embedded <a href="https://pglite.dev">pglite</a> index rebuilt from the Markdown files, giving you hybrid vector + keyword search, deterministic graph traversal, and grounded LLM synthesis.</p>
+        <p><b>brain</b> gives you both. Structure comes from an <a href="#tbox">entity-component-system ontology</a> with <a href="#tbox">OWL axioms</a> the loader checks; trust comes from the fact that <strong>every write — CLI <em>or</em> MCP — is validated against that schema</strong>, so the graph can't drift into inconsistency. Queries run against a <a href="#database">PostgreSQL index</a> rebuilt from the Markdown files, giving you BM25-shaped keyword search, pgvector similarity, deterministic graph traversal, and two model-driven modes on top.</p>
+        <p>And the data never leaves: the index is one container on <em>your</em> machine, the models are whatever you point it at, and the source of truth is a folder of Markdown you can read with <code>cat</code>.</p>
       </div>
       <div style="justify-self:center; width:100%;">
         <div class="facts">
@@ -109,12 +114,13 @@
           <div class="row big"><span>State</span><b>plain Markdown on disk</b></div>
           <div class="row"><span>Structure</span><b>ECS ontology (T-box)</b></div>
           <div class="row"><span>Every write</span><b>schema-validated</b></div>
-          <div class="row"><span>Index</span><b>pglite + pgvector (HNSW)</b></div>
-          <div class="row"><span>Serving</span><b>resident server · ms queries at 2M+ nodes</b></div>
-          <div class="row"><span>Retrieval</span><b>hybrid + graph + LLM</b></div>
-          <div class="row"><span>Explore</span><b>real-time WebGL graph viz</b></div>
+          <div class="row"><span>Axioms</span><b>owl: transitive · inverse · chain</b></div>
+          <div class="row"><span>Index</span><b>PostgreSQL 18 + pgvector · one schema per brain</b></div>
+          <div class="row"><span>Serving</span><b>ms queries at 2M+ nodes · no server required</b></div>
+          <div class="row"><span>Ask</span><b>six ways · <code>crawl</code> by default</b></div>
+          <div class="row"><span>Explore</span><b>a wiki, in Rust → wasm</b></div>
           <div class="row"><span>Agents</span><b>typed tools over MCP</b></div>
-          <div class="row"><span>Runtime</span><b>Bun + CoffeeScript</b></div>
+          <div class="row"><span>Runtime</span><b>Rust (one static binary)</b></div>
           <div class="row big"><span>Your data leaves the machine?</span><b>never</b></div>
         </div>
       </div>
@@ -193,10 +199,9 @@
       <p class="kicker">Install, initialize, and you have a brain</p>
 
       <h3><span class="pill g">1</span> Install</h3>
-      <p>Built for <a href="https://bun.sh">Bun</a> with <a href="https://coffeescript.org/">CoffeeScript</a>. Link it from local disk:</p>
-      <pre><button class="copy">copy</button><code>bun install
-bun link              <span class="c"># register the global `brain` command</span></code></pre>
-      <p class="muted">The <code>agl-ai</code> dependency supplies embeddings + chat via GitHub Copilot (default), LM-Studio, or Ollama — no separate model server required.</p>
+      <p>One Rust binary, no runtime:</p>
+      <pre><button class="copy">copy</button><code>cargo install --path .          <span class="c"># or: cargo build --release</span></code></pre>
+      <p class="muted">During development, <a href="https://github.com/indexable-inc/blaze">blaze</a> is a drop-in for cargo that rebuilds this tree in about a tenth of a second: <code>blaze build --release</code>. Model endpoints are whatever you point <code>brain.yaml</code> at — an OpenAI-compatible chat server for phrasing, and a decision slot for <a href="#crawl"><code>crawl</code></a>. Both default to localhost, and <code>embed.model: none</code> switches the vector half off entirely.</p>
 
       <h3><span class="pill g">2</span> Initialize a database</h3>
       <p>Run <code>brain init</code> in any directory to scaffold a new store:</p>
@@ -204,41 +209,62 @@ bun link              <span class="c"># register the global `brain` command</spa
       <pre><button class="copy">copy</button><code><span class="f">brain.yaml</span>               <span class="c"># per-db config (models, reranker, storage dirs)</span>
 <span class="f">db/</span>
   <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entity instances — the A-box (git-tracked)</span>
-  <span class="f">schema.yaml</span>            <span class="c"># classes, attributes, relations — the T-box (git-tracked)</span>
-  <span class="f">pgdata/</span>                <span class="c"># pglite index — rebuildable, gitignored</span></code></pre>
+  <span class="f">schema.yaml</span>            <span class="c"># classes, attributes, relations, axioms — the T-box (git-tracked)</span></code></pre>
+      <p class="muted">Nothing rebuildable is written into <code>db/</code> any more. The index lives in the shared <a href="#database">PostgreSQL instance</a>, in a schema named after this brain.</p>
 
-      <h3><span class="pill g">3</span> Index, then serve</h3>
-      <p>Disk is read in exactly one place — the explicit <code>reindex</code> — and queries are served by a resident <a href="#server">server</a> that holds the indexed graph in memory:</p>
-      <pre><button class="copy">copy</button><code>brain reindex          <span class="c"># the ONE .md → index path (required before the server will start)</span>
-brain server start &amp;   <span class="c"># the ONE process that owns pglite; serves every other command</span>
-brain search <span class="s">"anything"</span>  <span class="c"># instant thin-client CLI — milliseconds, even at millions of nodes</span></code></pre>
-      <div class="callout tip"><p><span class="lbl">Two sources of truth, one at a time.</span> The <code>.md</code> files are the git-friendly, human-editable representation; <em>while the server runs, the index is authoritative</em> — writes land there first (instantly searchable) and <code>brain export</code> materializes them back to Markdown whenever you want a diff-able snapshot. You can always rebuild either side from the other.</p></div>
+      <h3><span class="pill g">3</span> Start the database, index, ask</h3>
+      <p>Disk is read in exactly one place — the explicit <code>reindex</code>:</p>
+      <pre><button class="copy">copy</button><code>brain pg install &amp;&amp; brain pg start   <span class="c"># the shared PostgreSQL, once per machine</span>
+brain reindex                       <span class="c"># the ONE .md → index path</span>
+brain <span class="s">"which team supports the payments product?"</span>   <span class="c"># crawl is the default</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">Rebuilding is opt-in.</span> A command rebuilds only when the index is <em>empty</em>, and the staleness <em>check</em> is skipped too — nothing spends time detecting staleness unless you ask. The consequence is honest and worth stating: a stale index can serve slugs the files no longer have, and nothing will warn you. <code>brain reindex</code> is the whole remedy, and <code>brain reindex --check</code> asks the question deliberately.</p></div>
 
       <h3><span class="pill g">4</span> Ask for help anytime</h3>
       <pre><button class="copy">copy</button><code>brain              <span class="c"># the grouped command list</span>
 brain help graph   <span class="c"># detailed usage + examples for any subcommand</span></code></pre>
     </section>
 
+    <!-- =========================== DATABASE ============================ -->
+    <section id="database">
+      <h2><span class="bullet"></span>The database <a class="anchor" href="#database">#</a></h2>
+      <p class="kicker">One PostgreSQL for every brain on the machine — started on request, never behind your back</p>
+      <p>v1 embedded <a href="https://pglite.dev">pglite</a>: a single-threaded WebAssembly build of Postgres inside one Bun process. It was genuinely portable and it still <a href="#benchmark">beat a native engine on most of the benchmark</a> — but it was one core, one process, and a WASM memory ceiling. v2 talks to a real server: <strong>PostgreSQL 18 with pgvector, in one rootless podman container</strong>, which <code>brain pg</code> manages.</p>
+      <div class="grid cols-3">
+        <div class="card"><h4>Not enabled by default</h4><p class="muted"><code>brain pg install</code> writes a <code>systemd --user</code> unit and <em>does not start it</em>. Nothing starts a database behind your back; <code>brain pg enable --now</code> is a separate, named decision.</p></div>
+        <div class="card"><h4>One server, many brains</h4><p class="muted">Each brain owns a PostgreSQL <em>schema</em> named after its alias. Two brains — or brain and any other app sharing the instance — cannot collide in the namespace even if both want a table called <code>entities</code>.</p></div>
+        <div class="card"><h4>The index is rebuildable</h4><p class="muted">So the tables are <code>UNLOGGED</code>. Not writing WAL for an artifact derived from <code>.md</code> on disk is most of why the 2M-node load is fast. A clean stop preserves them; a hard crash truncates them, and <code>brain reindex</code> is the recovery procedure.</p></div>
+      </div>
+      <pre><button class="copy">copy</button><code>brain pg install          <span class="c"># write the systemd --user unit (does not start or enable it)</span>
+brain pg start            <span class="c"># start it now</span>
+brain pg enable --now     <span class="c"># ...and at every login, from now on</span>
+brain pg status           <span class="c"># container state, server version, every brain schema on it</span>
+brain pg psql -c <span class="s">'select count(*) from entities'</span>
+brain pg stop</code></pre>
+      <p>What lives in a brain's schema:</p>
+      <pre><button class="copy">copy</button><code><span class="f">entities</span>   <span class="c"># one row per entity; `components` jsonb is authoritative</span>
+<span class="f">links</span>      <span class="c"># one row per directed edge, with its qualifiers</span>
+<span class="f">embeds</span>     <span class="c"># one pgvector per entity (absent when indexed --no-embed)</span>
+<span class="f">terms</span>      <span class="c"># document-frequency cache, so keyword scoring has a real IDF</span>
+<span class="f">comps</span>      <span class="c"># connected-component label per entity (a maintenance artifact)</span>
+<span class="f">meta</span>       <span class="c"># cached counters + the schema fingerprint</span></code></pre>
+      <div class="callout note"><p><span class="lbl">The tsvector is a generated column, not a trigger.</span> Postgres computes four weighted bands in C during <code>COPY</code> — A for name/slug/class, B for roles, C for own fields, D for relation lines and body — so a bulk load pays for the search vector once and never rewrites the heap. That banding is half of what makes <a href="#search"><code>search</code></a> rank a name match above a mention in someone else's relation list.</p></div>
+    </section>
+
     <!-- ============================ SERVER ============================= -->
     <section id="server">
-      <h2><span class="bullet"></span>The server <a class="anchor" href="#server">#</a></h2>
-      <p class="kicker">One process owns the database; everything else is a thin client</p>
-      <p><code>brain server start</code> runs the one long-lived process that opens pglite. It holds the fully-indexed graph resident for its entire lifetime, and every other invocation — CLI commands, <a href="#mcp">MCP</a>, the <a href="#viz">viz</a> — talks to it over a unix socket. That split buys three things at once:</p>
-      <div class="grid cols-3">
-        <div class="card"><h4>Instant CLI</h4><p class="muted">Clients don't open a database — they connect. Startup cost ≈ zero; invocations parallelize freely.</p></div>
-        <div class="card"><h4>Crash-proof</h4><p class="muted">Ctrl-C on any client is consequence-free; only the server touches <code>pgdata/</code>, and it closes cleanly on SIGINT/SIGTERM.</p></div>
-        <div class="card"><h4>Never a wrong answer</h4><p class="muted">During <code>reindex</code>/<code>export</code>/maintenance, queries <em>wait</em> behind the gate instead of reading a partial index. A stall beats a lie.</p></div>
-      </div>
-      <p>Exactly one server per <code>db/</code> is enforced by a <code>db/.lock</code> (PID + start time; stale locks are cleaned automatically). Maintenance is a set of subcommands you run manually or from your own scheduler:</p>
-      <pre><button class="copy">copy</button><code>brain server status       <span class="c"># PID, uptime, entity/link counts (cached), memory</span>
-brain server reindex      <span class="c"># rebuild the index in the running server (queries wait)</span>
+      <h2><span class="bullet"></span>The server (optional) <a class="anchor" href="#server">#</a></h2>
+      <p class="kicker">In v1 this was mandatory. It no longer is, and that is the point.</p>
+      <p>v1's server existed because <em>something</em> had to own the embedded database — exactly one process could open <code>pgdata/</code>, so every command was a thin client of it and the server was not optional. Now the database is a real server of its own, so <strong>every command works without a brain server at all</strong>: it connects, asks, and exits.</p>
+      <p><code>brain server start</code> is still worth running when you want one process to hold the connection pool and the parsed T-box, so a CLI invocation becomes a unix-socket round trip instead of a fresh pool and a fresh schema parse. It also serialises maintenance: during <code>reindex</code> and <code>export</code> the whole server is held, so a query <em>waits</em> rather than reading a half-built index. A stall beats a wrong answer.</p>
+      <pre><button class="copy">copy</button><code>brain server status       <span class="c"># pid, uptime, entity/link counts (cached), index freshness</span>
+brain server reindex      <span class="c"># rebuild in the running server (queries wait)</span>
 brain server components   <span class="c"># label connected components — enables O(1) "no path exists"</span>
 brain server vacuum       <span class="c"># VACUUM ANALYZE + refresh the cached size counters</span>
-brain server stop         <span class="c"># graceful shutdown (waits out in-flight maintenance)</span></code></pre>
+brain server stop</code></pre>
+      <p class="muted">Each of those also works with no server running, in which case the command does the work itself. <code>brain server status</code> with nothing listening reports on the <em>index</em>, because that is what the question is really about.</p>
       <p>Two bulk on-ramps complement the explicit lifecycle:</p>
-      <pre><button class="copy">copy</button><code>brain load ./some-dataset --no-embed   <span class="c"># import an already-structured dataset (no LLM, optional no embeddings)</span>
-brain export --prune                   <span class="c"># materialize the live index back to .md (and drop files for removed entities)</span></code></pre>
-      <div class="callout note"><p><span class="lbl">Writes are index-first.</span> <code>set</code> / <code>new</code> / <code>link</code> / <code>rm</code> / MCP writes land in the server's live index and are <em>instantly searchable</em> — no reindex step. The <code>.md</code> snapshot updates when <em>you</em> run <code>export</code>. Bulk <code>ingest</code> remains a file-based maintenance flow: it writes Markdown, and an explicit <code>reindex</code> takes it live.</p></div>
+      <pre><button class="copy">copy</button><code>brain load ./some-dataset --no-embed   <span class="c"># import an already-structured dataset (no LLM, no embeddings)</span>
+brain export --prune                   <span class="c"># materialize the live index back to .md (and drop removed files)</span></code></pre>
     </section>
 
     <!-- ========================== FIRST BRAIN ========================== -->
@@ -309,12 +335,39 @@ brain graph <span class="s">'Team -->|USES_SYSTEM| System'</span>   <span class=
       <div class="grid cols-3">
         <div class="card"><h4>Component</h4><p class="tag">the "C" in ECS</p><p class="muted">A reusable, typed bag of fields (<code>Naming</code>, <code>Identity</code>). Field types: <code>string · bool · int · date · enum · ref · json</code>, with <code>list: true</code> for arrays.</p></div>
         <div class="card"><h4>Class</h4><p class="tag">composes components</p><p class="muted">An entity type built by aliasing components onto it — <code>Person</code> <em>has</em> an <code>identity</code> and a <code>contact</code>. <code>--top</code> marks it a seed for graph traversal.</p></div>
-        <div class="card"><h4>Relation</h4><p class="tag">a typed edge</p><p class="muted">A directed link with a <em>domain</em>, <em>range</em>, and <em>cardinality</em> (<code>oto/otn/nto/mtm</code>), plus optional edge qualifiers.</p></div>
+        <div class="card"><h4>Relation</h4><p class="tag">a typed edge</p><p class="muted">A directed link with a <em>domain</em>, <em>range</em>, and <em>cardinality</em> (<code>oto/otn/nto/mtm</code>), plus optional edge qualifiers — and, in v2, OWL axioms.</p></div>
       </div>
+
+      <h3>The axioms (new in v2)</h3>
+      <p>v1's relations carried domain, range and cardinality. v2 takes the <a href="https://www.w3.org/TR/turtle/">Turtle</a>/<a href="https://www.w3.org/TR/owl2-primer/">OWL</a> ideas further: six axioms are first-class in <code>schema.yaml</code>, and the loader checks every one of them against a <strong>named invariant</strong>. A schema that would let a reasoner walk out of its own range cannot be loaded — the error says which invariant and on what.</p>
+      <pre><button class="copy">copy</button><code><span class="f">relations</span>:
+  <span class="f">ITEM_HAS_VARIANT</span>:
+    <span class="f">domain</span>: Item
+    <span class="f">range</span>: Item
+    <span class="f">cardinality</span>: mtm
+    <span class="f">inverseOf</span>: ITEM_VARIANT_OF      <span class="c"># owl:inverseOf — the ends must swap</span>
+  <span class="f">PART_OF</span>:
+    <span class="f">domain</span>: Region
+    <span class="f">range</span>: Region
+    <span class="f">transitive</span>: true               <span class="c"># owl:TransitiveProperty — needs domain == range</span>
+  <span class="f">SIBLING_OF</span>:
+    <span class="f">symmetric</span>: true                <span class="c"># owl:SymmetricProperty — needs domain == range</span>
+  <span class="f">REPORTS_TO</span>:
+    <span class="f">cardinality</span>: oto
+    <span class="f">functional</span>: true               <span class="c"># owl:FunctionalProperty — needs oto or nto</span>
+  <span class="f">GRANDPARENT_OF</span>:
+    <span class="f">chain</span>: [PARENT_OF, PARENT_OF]  <span class="c"># owl:propertyChainAxiom — range(A) must equal domain(B)</span>
+  <span class="f">ANCESTOR_OF</span>:
+    <span class="f">subPropertyOf</span>: RELATED_TO      <span class="c"># rdfs:subPropertyOf — the parent must be mtm</span></code></pre>
+      <p>The comments are not documentation; they are the invariants. A <code>transitive</code> relation whose domain differs from its range fails <code>transitive_range_mismatch</code>; a two-leg <code>chain</code> whose legs do not compose fails <code>chain_leg_mismatch</code>; an <code>inverseOf</code> whose ends do not swap fails <code>inverse_pair_mismatch</code>. <strong>The language is the type: a chain whose legs do not compose does not exist after the schema loads.</strong></p>
+      <p>Which makes the T-box exportable to anything that speaks RDF — including a proof assistant:</p>
+      <pre><button class="copy">copy</button><code>brain schema turtle &gt; tbox.ttl   <span class="c"># owl:/rdfs: triples, with prefixes</span>
+brain schema tsv                 <span class="c"># the same axioms as subject&lt;TAB&gt;predicate&lt;TAB&gt;object</span>
+brain schema relations EATS      <span class="c"># one relation and its axioms, with live edge counts</span></code></pre>
       <p>Inspect the schema at any time — brain renders it as YAML, a Mermaid graph, or per-class outlines:</p>
       <pre><button class="copy">copy</button><code>brain schema graph                   <span class="c"># whole schema as a mermaid graph (+ instance counts)</span>
-brain schema classes Person          <span class="c"># one class: its components / top / idField</span>
-brain schema methods EntityJournal   <span class="c"># component methods callable on a class</span></code></pre>
+brain schema classes Person          <span class="c"># one class: its components / top / idField / parent</span>
+brain schema relations               <span class="c"># every relation, its ends, and its axioms</span></code></pre>
       <div class="callout why"><p><span class="lbl">Why bother with a schema at all?</span> Because schema-aware memory behaves better than schema-blind memory in three ways: <strong>retrieval</strong> (the system knows what kinds of things exist and how they connect), <strong>validation</strong> (bad links and malformed properties are rejected early), and <strong>reasoning</strong> (schema narrows the plausible interpretations). Nothing stops a schema-less store from recording that a <em>server</em> "reports to" a person.</p></div>
     </section>
 
@@ -435,19 +488,60 @@ brain call EntityJournal/jdoe Entry__add <span class="s">'msg: kicked off the mi
 
     <!-- ============================= QUERY ============================= -->
     <section id="query">
-      <h2><span class="bullet"></span>Five ways to ask <a class="anchor" href="#query">#</a></h2>
+      <h2><span class="bullet"></span>Six ways to ask <a class="anchor" href="#query">#</a></h2>
       <p class="kicker">Retrieve: pick by what you know going in</p>
-      <p>brain exposes five query subcommands. They trade off along two axes — <em>deterministic vs. LLM-assisted</em>, and <em>ranked retrieval vs. exact traversal</em>. The point isn't one true query; it's matching the mode to the question.</p>
+      <p>brain exposes six query subcommands. They trade off along two axes — <em>deterministic vs. model-assisted</em>, and <em>ranked retrieval vs. exact traversal</em>. The point isn't one true query; it's matching the mode to the question. The first three cannot be wrong about the graph but need you to know what to ask; the last three accept a sentence.</p>
       <table>
         <thead><tr><th>Command</th><th>Kind</th><th>Use it when…</th></tr></thead>
         <tbody>
+          <tr><td><code>crawl</code> <span class="g">· default</span></td><td>one typed decision per hop</td><td>you have a question in words and want <em>the answer</em></td></tr>
           <tr><td><code>search</code></td><td>deterministic retrieval</td><td>you want a ranked list from a fuzzy phrase</td></tr>
-          <tr><td><code>think</code></td><td>LLM synthesis (RAG)</td><td>you want a written answer, not a list</td></tr>
-          <tr><td><code>ontology</code></td><td>LLM graph traversal</td><td>a multi-hop relational question, unknown slugs</td></tr>
+          <tr><td><code>think</code></td><td>model synthesis (RAG)</td><td>you want a written answer with citations and gaps</td></tr>
+          <tr><td><code>ontology</code></td><td>model graph traversal</td><td>a multi-hop question of a shape you can't predict</td></tr>
           <tr><td><code>graph</code></td><td>deterministic match</td><td>"find every pair matching this edge shape"</td></tr>
           <tr><td><code>graphql</code></td><td>deterministic traversal</td><td>you know the entity, want specific fields</td></tr>
         </tbody>
       </table>
+      <p class="muted">What separates the three model-driven modes is <em>where the model's freedom lives</em>. <code>think</code> is handed text and writes prose. <code>ontology</code> picks tool calls. <code>crawl</code> only ever picks among options the engine has already fetched — which is why a hallucinated path is not merely unlikely there, it is unrepresentable.</p>
+    </section>
+
+    <!-- ============================= CRAWL ============================= -->
+    <section id="crawl">
+      <h3><code>crawl</code> — one typed decision per hop <span class="pill g">default</span></h3>
+      <p>Ask in plain words. <code>crawl</code> walks the real graph to answer, and at every step the model is given a <em>menu the engine built from real edges</em> and asked exactly one typed question about it. It never writes a slug, a relation name or a path; it picks.</p>
+      <pre><button class="copy">copy</button><code>brain crawl <span class="s">'which non-lead engineer supports the payments product?'</span>
+brain <span class="s">'what do beefalo eat?'</span>            <span class="c"># crawl is the default — the subcommand is optional</span>
+brain crawl <span class="s">'how do you craft an alchemy engine?'</span> -v   <span class="c"># print the behaviour-tree walk</span></code></pre>
+      <p>Two models are involved, and the division of labour <em>is</em> the architecture: <strong>facts live in the engine, judgements live in the model.</strong> A non-autoregressive <em>decision slot</em> answers typed questions — a <code>choice</code> over a menu, or a <code>noul</code> (a truth value) about one node — in tens of milliseconds. A separate chat model phrases the final answer, and by default it <em>never sees the trace</em>: a model handed an agent's work log will describe the log, however firmly the prompt asks it not to.</p>
+
+      <h4>Every turn is a behaviour tree</h4>
+      <p>Re-evaluated from the root each turn, in the style of a game AI tree: conditions are cheap named predicates over engine state, control flow is real <code>if</code>s with early returns, and one tick resolves to exactly one action. Which stage is "active" is a <em>consequence</em> of named conditions, never a stored mode — so no stage can get stuck.</p>
+      <pre><button class="copy">copy</button><code><span class="c">? Fallback (root)</span>
+  <span class="f">COMMIT</span>      standing on something that may answer the question
+  <span class="f">RANK</span>        the question asked for the BEST one, and the set is complete
+  <span class="f">FINISH</span>      the answer slot is fully enumerated
+  <span class="f">ENUMERATE</span>   judge the rest of the slot, in place
+  <span class="f">SEEK</span>        walk the chain toward a node of the answer kind
+  <span class="f">ORIENT</span>      find the object the question is about
+  <span class="c">? </span><span class="f">RECOVER</span>     the chain ran out: go back, or widen the net</code></pre>
+
+      <h4>The seven rules that earned their keep</h4>
+      <p class="muted">Each of these was measured, and several replaced something that read better and worked worse.</p>
+      <ol>
+        <li><b>Grounded options only.</b> Never offer an action that cannot change anything. Every menu entry is a real edge, a real node, or a search that actually surfaces something new.</li>
+        <li><b>Facts in the engine, judgements in the model.</b> Anything the schema or the graph already states is read, not asked. The answer's <em>kind</em>, for instance, often falls straight out of a declared relation: <code>EATS</code> is <code>Animal → Item</code>, so whatever eats, the thing eaten is an Item.</li>
+        <li><b>The model prefers travelling to committing.</b> Only 3 of 20 contested turns disagree with the engine's own ordering — so the tree's hand-written priority is load-bearing far less often than it looks.</li>
+        <li><b>Never ask a question with no wrong answer.</b> A one-option menu is taken by the engine (p=1.000 every time it was measured). A node reached along the very relation the question names is not re-judged — the edge exists, and that is not a judgement.</li>
+        <li><b>Scope the state payload.</b> A judgement is a function of (question, one node) and nothing else. One node scored 0.856 judged alone and 0.566 judged with eighteen accumulated slugs in the payload — the same node, the same question, on opposite sides of the threshold.</li>
+        <li><b>Benchmark the whole distribution</b>, not the cases you are fixing.</li>
+        <li><b>A bound measured from the wrong thing is not a bound.</b></li>
+      </ol>
+
+      <div class="callout tip"><p><span class="lbl">Three shapes of answer, decided once.</span> A <em>set</em> ("which people support X?") enumerates one relational slot. A <em>fact</em> ("can Wurt eat meat?") is a property of one node, so the crawl walks until it finds the node whose own record holds it. A <em>superlative</em> ("best use of mandrake for health") gathers a set and then decides once, relatively — because the scores there order correctly while all sitting under the commit gate, which is exactly the shape an absolute threshold cannot handle.</p></div>
+      <pre><button class="copy">copy</button><code>$ brain <span class="s">'best use of mandrake for health'</span>
+Mandrake Soup is the best use of a Mandrake for health. It restores 150 Hunger,
+100 Health, and 5 Sanity, and — unlike raw or cooked Mandrakes — it does not
+cause sleep.</code></pre>
     </section>
 
     <!-- ============================ SEARCH ============================= -->
@@ -511,18 +605,25 @@ EOF
     </section>
 
     <!-- ============================== VIZ ============================== -->
-    <section id="viz">
-      <h3><code>viz</code> — the real-time explorer</h3>
-      <p>The whole graph as a browser-based, game-style WebGL world: every entity is a point in a volumetric cloud, colored by <a href="#server">connected component</a> and sized by degree — 2M+ nodes at interactive frame rates. Edges are deliberately never drawn; clustering and color carry the structure, the way an accretion disk reveals gravity.</p>
-      <pre><button class="copy">copy</button><code>brain viz                <span class="c"># http://127.0.0.1:4321 — runs until Ctrl-C</span>
-brain viz --relayout     <span class="c"># recompute the cached layout after big ingests</span></code></pre>
-      <ul>
-        <li><strong>All five query modes</strong> in a floating search bar — <code>search</code> (with strategy chips), <code>think</code> / <code>ontology</code> (with an LLM model picker, a reasoning toggle, an include-my-selection toggle, and optional spoken answers), <code>graph</code> patterns, and <code>graphql</code> projections — results in a collapsible sidebar with per-query latency shown in ms.</li>
-        <li><strong>Game navigation</strong>: WASD fly, E/Q up/down, middle-mouse orbit, hold-Space pan, wheel dolly, click select, Ctrl+click multi-select, <code>F</code> to frame the selection, <code>⌂</code> to fly back out to the whole universe. An always-visible FPS histogram keeps rendering honest.</li>
-        <li><strong>2D/3D toggle</strong>: components are laid out as volumetric BFS shells around their hub ("mold grown in ballistic gel"); 2D flattens to the disk projection. Screen-space picking guarantees a click selects exactly the dot you see.</li>
-        <li><strong>Hot-reloadable</strong>: the HUD is an <a href="https://github.com/mikesmullin/m-js">m.js</a> component tree and the server pushes edits live — camera position, store state, and the loaded dataset all survive.</li>
-      </ul>
-      <div class="callout note"><p><span class="lbl">Architecture-true.</span> The viz is a thin client like everything else: layout and component labels are cached maintenance artifacts computed by the server; the browser fetches one binary point cloud and proxies every lookup through the same RPC surface the CLI uses.</p></div>
+    <section id="web">
+      <h3><code>web</code> — the wiki</h3>
+      <p>One page per entity, its fields set for reading a paragraph, its relations as links, and a search bar at the top that runs <a href="#crawl"><code>crawl</code></a> by default.</p>
+      <pre><button class="copy">copy</button><code>brain web                <span class="c"># http://127.0.0.1:4321</span>
+./dev.sh                 <span class="c"># the same thing, with the wasm toolchain bootstrapped</span></code></pre>
+      <div class="callout note"><p><span class="lbl">v1's explorer is gone, deliberately.</span> It put two million entities on screen as a WebGL point cloud and an agent in a sidebar. The point cloud was a demo rather than a tool — the structure it showed was real but nothing was answerable from it — and the sidebar agent was worse at answering than a search box that crawls. Neither is in v2.</p></div>
+
+      <h4>Rust on both sides</h4>
+      <p>The frontend is <strong>Rust compiled to wasm</strong>, rendering through <a href="https://github.com/mikesmullin/m-js">m.js</a>, on the <code>rustex1</code> kit. There is no JavaScript in the repository except the kit's two bridge files — components, templates, state, routes and networking are all Rust, so changing a page is <code>cargo</code>'s problem and not a second toolchain's. Templates are built as <code>m()</code> trees, which means the structure is an expression the compiler checks and the kit's linter checks the directives before anything paints.</p>
+      <p>One process serves the app, watches the sources, compiles the frontend and pushes the result into the browser over a single websocket:</p>
+      <table>
+        <thead><tr><th>You edit</th><th>What happens</th></tr></thead>
+        <tbody>
+          <tr><td><code>app/**.rs</code></td><td>cargo + wasm-bindgen (~0.4s), then <code>__M_BOOT__(t)</code> — <strong>no page reload, stores kept</strong></td></tr>
+          <tr><td><code>web/styles.css</code></td><td>the <code>&lt;link&gt;</code> is cache-busted in place — <strong>zero redraws</strong></td></tr>
+          <tr><td><code>src/**.rs</code></td><td>cargo build, then the process re-execs itself and the client reconnects</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">A compile error does not kill the dev server and does not cover the page: cargo's stderr goes to the terminal, the last good build keeps running underneath, and the browser gets a one-line flash.</p>
     </section>
 
     <hr class="div">
@@ -532,8 +633,16 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
       <h2><span class="bullet"></span>Serving agents over MCP <a class="anchor" href="#mcp">#</a></h2>
       <p class="kicker">Use · the capstone — the ontology shapes the tool surface</p>
       <p>The final layer of the memory stack is how an agent is <em>allowed to act</em>. brain serves itself over the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> as a set of <strong>structured, typed tools</strong> — not one giant query DSL.</p>
-      <pre><button class="copy">copy</button><code>brain mcp     <span class="c"># stdio MCP server (a thin adapter over the running brain server)</span></code></pre>
-      <p>It exposes <code>search</code>, <code>think</code>, <code>ontology</code>, <code>graph</code>, <code>graphql</code>, <code>get_entity</code>, <code>put_entity</code>, <code>delete_entity</code>, <code>schema_methods</code>, <code>method_invoke</code>, and <code>schema_orphans</code> — tool-for-tool identical to the CLI query surface, because both are thin adapters over one shared core (edits to one can never drift from the other). <code>put_entity</code> is the <strong>sanctioned write path</strong> for agents: it always persists to the live index (instantly searchable), and schema-validation issues come back as soft notices to fix up — an agent can store a partial fact now and repair it next turn, instead of losing it to a hard error.</p>
+      <pre><button class="copy">copy</button><code>brain mcp                <span class="c"># stdio MCP server</span>
+brain --use ada mcp      <span class="c"># pin this process to one brain, whatever other shells do</span></code></pre>
+      <p>Eleven tools, one per mode plus the write surface — <code>crawl</code>, <code>search</code>, <code>think</code>, <code>ontology</code>, <code>graph</code>, <code>graphql</code>, <code>get_entity</code>, <code>put_entity</code>, <code>delete_entity</code>, <code>schema</code>, <code>validate</code> — tool-for-tool identical to the CLI, because both are thin adapters over one core.</p>
+      <p><strong><code>crawl</code> is the first tool and the one the server tells agents to reach for</strong>, in the <code>initialize</code> instructions: <em>"Prefer <code>crawl</code> for a question in words; <code>graph</code>/<code>graphql</code> when you already know the slug or the pattern."</em> It takes a sentence and returns the phrased answer together with the slugs behind it, so the calling agent gets something it can both relay <em>and</em> check:</p>
+      <pre><button class="copy">copy</button><code><span class="c">→</span> {<span class="s">"name"</span>:<span class="s">"crawl"</span>,<span class="s">"arguments"</span>:{<span class="s">"question"</span>:<span class="s">"what do beefalo eat?"</span>}}
+<span class="c">←</span> {<span class="s">"answer"</span>: <span class="s">"Beefalo eat Cut Grass, Twigs, and Beefalo Treats. …"</span>,
+     <span class="s">"slugs"</span>:  [<span class="s">"Item/Cut_Grass"</span>, <span class="s">"Item/Twigs"</span>, <span class="s">"Item/Beefalo_Treats"</span>],
+     <span class="s">"labels"</span>: [<span class="s">"Cut Grass"</span>, <span class="s">"Twigs"</span>, <span class="s">"Beefalo Treats"</span>],
+     <span class="s">"kind"</span>: <span class="s">"Item"</span>, <span class="s">"mode"</span>: <span class="s">"set"</span>, <span class="s">"steps"</span>: 6, <span class="s">"ms"</span>: 1166}</code></pre>
+      <p>Which matters more over MCP than it does at a terminal. An agent that cannot see the graph has no way to audit a free-text answer — but every slug in that array is a slug in the index, by construction, and <code>get_entity</code> will fetch any of them. <code>put_entity</code> is the sanctioned write path, and <code>put_entity</code> with <code>dry_run</code> answers "what does a valid entity of this class look like?" without writing anything.</p>
       <div class="callout why"><p><span class="lbl">Why structured tools beat a string DSL.</span> A structured tool call removes the grammar burden and exposes intent directly. Compare <code>ontology search "(:Team)-[:OWNS].role→: owner"</code> with a typed call <code>{ class: "Team", relation: "OWNS", relation_property: { role: "owner" } }</code>. Both are schema-dependent, but the typed one is far easier for an agent to produce correctly on the first try. This is the whole point of an MCP surface: shift the problem from brittle syntax to explicit, typed intent — and let the <em>ontology shape the tools the agent sees</em>.</p></div>
     </section>
 
@@ -548,7 +657,8 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
           <tr><td>Short-term context</td><td><span class="muted">(the calling agent's prompt window)</span></td></tr>
           <tr><td>Fact memory</td><td>typed entities extracted via <code>ingest</code> / <code>set</code></td></tr>
           <tr><td>Knowledge graph</td><td>explicit relations + <code>graph</code> / <code>graphql</code> traversal</td></tr>
-          <tr><td>Ontology</td><td>the T-box schema, constraints, and <code>schema</code> introspection</td></tr>
+          <tr><td>Grounded answering</td><td><code>crawl</code> — a question in words, answered by walking the graph</td></tr>
+          <tr><td>Ontology</td><td>the T-box schema, its OWL axioms, and <code>schema</code> introspection</td></tr>
           <tr><td>Structured tools</td><td>the MCP surface — validated, typed, reliable</td></tr>
           <tr><td>Dynamic tool shaping</td><td><span class="muted">frontier: schema-derived tools per task (future)</span></td></tr>
         </tbody>
@@ -585,24 +695,25 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
       <pre><button class="copy">copy</button><code><span class="f">brain.yaml</span>               <span class="c"># per-db config, sibling of db/</span>
 <span class="f">db/</span>
   <span class="f">&lt;Class&gt;/&lt;id&gt;.md</span>        <span class="c"># entities (A-box, git-tracked)</span>
-  <span class="f">schema.yaml</span>            <span class="c"># the T-box (git-tracked)</span>
-  <span class="f">pgdata/</span>                <span class="c"># pglite index (rebuildable → gitignored)</span>
-  <span class="f">config.yaml</span>            <span class="c"># optional: viz LLM model roster (`models:` list)</span>
-  <span class="f">viz/</span>                   <span class="c"># cached layout + component labels (rebuildable → gitignored)</span>
-  <span class="f">.lock</span> <span class="f">.sock</span>            <span class="c"># server singleton guard + unix socket (runtime, gitignored)</span>
-<span class="f">refiner/&lt;Class&gt;.coffee</span>    <span class="c"># optional per-class refiners (dataset-local)</span>
-<span class="f">components/&lt;Comp&gt;.coffee</span>  <span class="c"># optional component methods (dataset-local)</span></code></pre>
+  <span class="f">schema.yaml</span>            <span class="c"># the T-box (git-tracked)</span></code></pre>
+      <p class="muted">That is the whole of it. v1 kept <code>pgdata/</code>, <code>viz/</code>, <code>.lock</code> and <code>.sock</code> in here; none of them exist now. The index is a schema in the shared <a href="#database">PostgreSQL instance</a>, and the socket lives under <code>$XDG_RUNTIME_DIR/brain/</code>.</p>
       <pre><button class="copy">copy</button><code><span class="c"># brain.yaml — defaults</span>
 <span class="f">embed</span>:
-  <span class="f">model</span>: copilot:text-embedding-3-small
-<span class="f">think</span>:
-  <span class="f">model</span>: copilot:claude-sonnet-5
-<span class="f">search</span>:
-  <span class="f">reranker</span>: off
-<span class="f">refine</span>:
-  <span class="f">maxPasses</span>: 4
-<span class="f">storage</span>: []             <span class="c"># additional db dirs to aggregate (e.g. a private overlay)</span></code></pre>
-      <div class="callout tip"><p><span class="lbl">Multiple brains, shared or private.</span> Keep one brain per app, commit them to different repos (some shared, some private), and aggregate extra <code>db/</code> dirs via <code>storage:</code>. A peer clones the <code>.md</code> files and runs <code>brain reindex</code> to rebuild the index with <em>their</em> embedder — models need not match, only be internally consistent.</p></div>
+  <span class="f">model</span>: none                           <span class="c"># `none` skips the vector half entirely</span>
+  <span class="f">url</span>: http://127.0.0.1:1234/v1/embeddings
+  <span class="f">dims</span>: 768
+<span class="f">llm</span>:
+  <span class="f">chat_url</span>: http://127.0.0.1:1234         <span class="c"># phrasing: think, ontology, the crawl finalizer</span>
+  <span class="f">chat_model</span>: default
+  <span class="f">slot_url</span>: http://127.0.0.1:1237         <span class="c"># the crawl's typed decision slot</span>
+<span class="f">pg</span>:
+  <span class="f">host</span>: 127.0.0.1
+  <span class="f">port</span>: 5433
+  <span class="f">dbname</span>: brain
+  <span class="f">user</span>: brain
+  <span class="f">schema</span>: <span class="c"># defaults to the brain's alias, sanitized</span>
+<span class="f">storage</span>: []                              <span class="c"># additional db dirs to aggregate</span></code></pre>
+      <div class="callout tip"><p><span class="lbl">Multiple brains, shared or private.</span> Keep one brain per app, commit them to different repos (some shared, some private), and aggregate extra <code>db/</code> dirs via <code>storage:</code>. A peer clones the <code>.md</code> files and runs <code>brain reindex</code> to rebuild the index with <em>their</em> embedder — models need not match, only be internally consistent. They all share one PostgreSQL and still cannot see each other, because each owns its own schema.</p></div>
     </section>
 
     <!-- ============================== CLI ============================= -->
@@ -613,15 +724,40 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
         <thead><tr><th>Group</th><th>Commands</th></tr></thead>
         <tbody>
           <tr><td>Create</td><td><code>init</code></td></tr>
-          <tr><td>Schema (T-box)</td><td><code>def component</code> · <code>def class</code> · <code>def relation</code> · <code>schema graph|uniq|components|classes|methods|orphans</code></td></tr>
-          <tr><td>Data (A-box)</td><td><code>new</code> · <code>set</code> · <code>ls</code> · <code>link</code> · <code>get</code> · <code>rm</code> · <code>call</code></td></tr>
-          <tr><td>External data</td><td><code>ingest</code> · <code>enrich</code> · <code>load</code></td></tr>
-          <tr><td>Run</td><td><code>server start|stop|status|vacuum|reindex|export|components</code> · <code>reindex</code> · <code>export</code></td></tr>
-          <tr><td>Integrity</td><td><code>validate</code> · <code>refine</code></td></tr>
-          <tr><td>Query</td><td><code>search</code> · <code>think</code> · <code>ontology</code> · <code>graph</code> · <code>graphql</code> · <code>viz</code></td></tr>
+          <tr><td>Schema (T-box)</td><td><code>def component</code> · <code>def class</code> · <code>def relation</code> · <code>schema graph|uniq|components|classes|relations|turtle|tsv|orphans</code></td></tr>
+          <tr><td>Data (A-box)</td><td><code>new</code> · <code>set</code> · <code>ls</code> · <code>link</code> · <code>get</code> · <code>rm</code></td></tr>
+          <tr><td>External data</td><td><code>ingest</code> · <code>enrich</code> · <code>load</code> · <code>convert</code></td></tr>
+          <tr><td>Run</td><td><code>pg install|start|stop|status|enable|psql</code> · <code>server start|stop|status|vacuum|reindex|export|components</code> · <code>reindex</code> · <code>export</code></td></tr>
+          <tr><td>Integrity</td><td><code>validate</code> · <code>bench</code></td></tr>
+          <tr><td>Query</td><td><code>crawl</code> <span class="g">(default)</span> · <code>search</code> · <code>think</code> · <code>ontology</code> · <code>graph</code> · <code>graphql</code> · <code>web</code></td></tr>
           <tr><td>Serve</td><td><code>mcp</code></td></tr>
         </tbody>
       </table>
+    </section>
+
+    <!-- =========================== MIGRATE ============================= -->
+    <section id="migrate">
+      <h2><span class="bullet"></span>Migrating from v1 <a class="anchor" href="#migrate">#</a></h2>
+      <p class="kicker">The data does not move. Almost everything else did.</p>
+      <p>A v1 database is a v2 database. The <code>.md</code> format is unchanged and <code>schema.yaml</code> is read as-is, including v1's full field-type set, so the migration is:</p>
+      <pre><button class="copy">copy</button><code>brain pg install &amp;&amp; brain pg start
+brain --db /path/to/your/v1/brain reindex</code></pre>
+      <p>There is no export step and nothing is rewritten. What <em>will</em> happen is that v2's validator is stricter than v1's — it checks cardinality against the data, and <code>ref</code> fields for dangling targets — so expect it to report things v1 did not. Those are findings about the data, not migration errors.</p>
+      <p>An <strong>es6 brain</strong> (a <code>schema.mjs</code> + <code>data.mjs</code> pair, where the T-box vocabulary was worked out) converts in one command:</p>
+      <pre><button class="copy">copy</button><code>brain convert /path/to/es6-brain --out ./db</code></pre>
+      <p>The A-box convention is preserved exactly. Two things are reported rather than silently done: ids carrying a character a filename may not (an apostrophe) are renamed, <em>and every edge pointing at one is renamed with them</em>; and a declaration the data contradicts — a <code>nto</code> relation with four targets — is widened, because a cardinality the data contradicts is a stale declaration rather than a constraint.</p>
+      <table>
+        <thead><tr><th>v1</th><th>v2</th></tr></thead>
+        <tbody>
+          <tr><td><code>brain viz</code></td><td><code>brain web</code> — a wiki, not a point cloud</td></tr>
+          <tr><td><code>db/pgdata/</code></td><td>a schema in the shared instance; <code>brain pg</code></td></tr>
+          <tr><td>a server was required</td><td>optional; every command works without one</td></tr>
+          <tr><td><code>brain refine</code></td><td>not carried over — <code>brain validate</code> reports what it would have fixed</td></tr>
+          <tr><td><code>brain call</code> / component methods</td><td>not carried over; the schema still records the surface</td></tr>
+          <tr><td>Bun + CoffeeScript</td><td>one Rust binary</td></tr>
+        </tbody>
+      </table>
+      <div class="callout note"><p><span class="lbl">Two things from v1 are deliberately absent.</span> <code>refine</code> (per-class repair scripts) and <code>call</code> (component methods) were both <em>dataset-local CoffeeScript</em> — they worked by loading <code>.coffee</code> out of the database directory and running it. That mechanism does not survive the move to a compiled binary, and replacing it with a plugin ABI is a bigger decision than this release. <code>validate</code> reports every condition <code>refine</code> repaired, so nothing is undiagnosed; it just is not automatically fixed.</p></div>
     </section>
 
     <!-- ============================ READING ============================ -->
@@ -631,10 +767,10 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
         <li><a href="https://github.com/mikesmullin/brain">github.com/mikesmullin/brain</a> — the source, README, and <code>SKILL.md</code> (the agent-facing quick reference).</li>
         <li><a href="https://github.com/mikesmullin/brain/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a> — the full Panama Papers benchmark: methodology, parity caveats, reproduction.</li>
         <li><a href="https://github.com/mikesmullin/ontology">ontology</a> — brain's predecessor (v1), where the T-box / A-box model started.</li>
-        <li><a href="https://github.com/mikesmullin/agl">agl-ai</a> — the embeddings + chat + microagent framework brain builds on.</li>
-        <li><a href="https://github.com/mikesmullin/m-js">m-js</a> — the minimalist UI framework (+ HMR) behind the <a href="#viz">viz</a> HUD.</li>
-        <li><a href="https://github.com/Evokoa/pgGraph">pgGraph</a> — the CSR PostgreSQL graph engine whose design (and benchmark dataset) inspired brain's server architecture.</li>
-        <li><a href="https://modelcontextprotocol.io">Model Context Protocol</a> · <a href="https://pglite.dev">pglite</a> · <a href="https://github.com/pgvector/pgvector">pgvector</a> · <a href="https://threejs.org">three.js</a> — the moving parts under the hood.</li>
+        <li><a href="https://github.com/mikesmullin/m-js">m-js</a> — the minimalist UI framework (+ HMR) the <a href="#web">wiki</a> renders through.</li>
+        <li><code>rustex1</code> — the Rust→wasm frontend kit and hot-reloading dev server, vendored at <code>vendor/rustex1</code>.</li>
+        <li><a href="https://github.com/Evokoa/pgGraph">pgGraph</a> — the CSR PostgreSQL graph engine whose design (and benchmark dataset) inspired brain's architecture.</li>
+        <li><a href="https://modelcontextprotocol.io">Model Context Protocol</a> · <a href="https://github.com/pgvector/pgvector">pgvector</a> · <a href="https://www.w3.org/TR/owl2-primer/">OWL 2</a> · <a href="https://github.com/indexable-inc/blaze">blaze</a> — the moving parts under the hood.</li>
       </ul>
     </section>
 
@@ -643,7 +779,7 @@ brain viz --relayout     <span class="c"># recompute the cached layout after big
       <div class="brainrow">🧠 🧠 🧠</div>
       <p><strong>brain</strong> — data for agentic AI. A knowledge graph that lives in your repo.<br>
       Write · maintain · retrieve · use. Your memory, typed and yours.</p>
-      <p class="muted">Built on Bun + CoffeeScript · ECS ontology · pglite hybrid search · MCP tools</p>
+      <p class="muted">v2.0.0 — Rust · OWL-flavoured ECS ontology · PostgreSQL hybrid search · a graph-crawling answerer · MCP tools</p>
     </div>
 
   </div>

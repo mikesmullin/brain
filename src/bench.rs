@@ -186,6 +186,12 @@ fn panama_etl(a: &Args) -> Result<i32> {
     let mut rels: std::collections::BTreeSet<String> = Default::default();
     let mut edges = 0u64;
     let mut dropped = 0u64;
+    let mut duplicate = 0u64;
+    // (from, rel, to) is a key in the index, so the same triple arriving twice
+    // is one edge. brain1 deduped here too and reported both numbers; keeping
+    // the raw total alongside is what lets a reader check that every CSV row
+    // was accounted for rather than quietly lost.
+    let mut seen_edge: std::collections::HashSet<(u64, u32, u64)> = Default::default();
     for rec in rdr.records() {
         let Ok(rec) = rec else { continue };
         let (Some(s), Some(e), Some(t)) = (rec.get(ci), rec.get(co), rec.get(ct)) else { continue };
@@ -203,6 +209,13 @@ fn panama_etl(a: &Args) -> Result<i32> {
         let from = format!("{}/{s}", so[0]);
         let to = format!("{}/{e}", eo[0]);
         rels.insert(rel.clone());
+        // hash the triple rather than storing it: 3.3M owned String triples is
+        // gigabytes, and a 64-bit digest of each endpoint is enough here
+        let key = (hash64(&from), hash32(&rel), hash64(&to));
+        if !seen_edge.insert(key) {
+            duplicate += 1;
+            continue;
+        }
         pending.entry(from).or_default().push((rel, to));
         edges += 1;
     }
@@ -263,7 +276,8 @@ fn panama_etl(a: &Args) -> Result<i32> {
     let n = written.load(Ordering::Relaxed);
     println!("\n{} -> {}", zip.display(), out.display());
     println!("  entities      {n}");
-    println!("  edges         {edges}  (+{same} SAME_NODE_ID)");
+    println!("  edges         {edges} deduped  (+{same} SAME_NODE_ID)");
+    println!("  raw rows      {} = {edges} + {duplicate} duplicate + {dropped} unresolvable", edges + duplicate + dropped);
     println!("  relations     {}", rels.len());
     println!("  dropped       {dropped} edge row(s) with an endpoint in no node CSV");
     println!("  wall          {:.1}s", t0.elapsed().as_secs_f64());
@@ -302,6 +316,17 @@ fn flush_nodes(
         written.fetch_add(1, Ordering::Relaxed);
     });
     Ok(())
+}
+
+fn hash64(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+fn hash32(s: &str) -> u32 {
+    (hash64(s) >> 32) as u32
 }
 
 fn sanitize_field(h: &str) -> String {

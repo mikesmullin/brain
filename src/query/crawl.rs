@@ -312,13 +312,6 @@ impl<'a> World<'a> {
         Ok(())
     }
 
-    pub async fn ensure_all(&mut self, slugs: &[String]) -> Result<()> {
-        for s in slugs {
-            self.ensure(s).await?;
-        }
-        Ok(())
-    }
-
     pub fn out(&self, slug: &str) -> &[(String, String)] {
         self.edges.get(slug).map(|(o, _)| o.as_slice()).unwrap_or(&[])
     }
@@ -379,10 +372,6 @@ impl<'a> World<'a> {
             lines.push(format!("  REL {rel}: {}", tos.join(" | ")));
         }
         lines.join("\n")
-    }
-
-    pub fn short(&self, slug: &str) -> String {
-        format!("{} - {}", class_of(slug), self.label(slug))
     }
 
     /// The relation joining two nodes, in either direction.
@@ -2126,7 +2115,6 @@ impl Blackboard {
 /// per turn so the tree itself stays pure and synchronous.
 pub struct Turn {
     pub front: Vec<String>,
-    pub front_total: usize,
     pub orient: Options,
     pub seek: Options,
     pub enumerate: Options,
@@ -2190,19 +2178,6 @@ fn chain_exhausted(c: &Crawl, t: &Turn) -> bool {
     !has_forward_edge(t) && !slot_open(c, t)
 }
 
-/// The stage the tree would pick right now, by the same conditions it uses.
-pub fn active_stage(c: &Crawl, t: &Turn) -> Stage {
-    if slot_open(c, t) {
-        return Stage::Enumerate;
-    }
-    if c.on_chain(None) && has_forward_edge(t) {
-        return Stage::Seek;
-    }
-    if !c.on_chain_any() {
-        return Stage::Orient;
-    }
-    Stage::Recover
-}
 
 /// One tick. Returns exactly one action, or `Pending` when it needs a typed
 /// answer first.
@@ -2768,7 +2743,7 @@ async fn build_turn(c: &mut Crawl, w: &mut World<'_>) -> Result<Turn> {
     let seek = forward_moves(c, w);
     let enumerate = slot_candidates(c, w, &front, front_total);
     let recover = recovery_options(c, w, &searches);
-    Ok(Turn { front, front_total, orient, seek, enumerate, recover })
+    Ok(Turn { front, orient, seek, enumerate, recover })
 }
 
 /// Tick the tree; whenever it needs a typed answer, fetch exactly that and tick

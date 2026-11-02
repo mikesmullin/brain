@@ -27,7 +27,6 @@ use deadpool_postgres::{Config as PoolConfig, ManagerConfig, Pool, RecyclingMeth
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
 use crate::abox::{Edge, Entity};
@@ -263,19 +262,7 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         Ok(())
     }
 
-    pub async fn drop_schema(&self) -> Result<()> {
-        let c = self.client().await?;
-        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.s())).await?;
-        Ok(())
-    }
 
-    pub async fn schema_exists(&self) -> Result<bool> {
-        let c = self.client().await?;
-        let r = c
-            .query_opt("SELECT 1 FROM pg_namespace WHERE nspname = $1", &[&self.schema])
-            .await?;
-        Ok(r.is_some())
-    }
 
     /// Every brain schema present on the shared server, with its row counts —
     /// what `brain pg status` prints so you can see who the neighbours are.
@@ -976,22 +963,6 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
-    /// Edges whose target is not an indexed entity.
-    pub async fn dangling(&self, limit: i64) -> Result<Vec<(String, String, String)>> {
-        let c = self.client().await?;
-        let s = self.s();
-        let rows = c
-            .query(
-                &format!(
-                    "SELECT l.from_slug, l.rel, l.to_slug FROM {s}.links l
-                      LEFT JOIN {s}.entities e ON e.slug = l.to_slug
-                      WHERE e.slug IS NULL ORDER BY l.from_slug LIMIT $1"
-                ),
-                &[&limit],
-            )
-            .await?;
-        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
-    }
 
     pub async fn vacuum(&self) -> Result<()> {
         let c = self.client().await?;
@@ -1000,20 +971,7 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         Ok(())
     }
 
-    pub async fn exec(&self, sql: &str) -> Result<()> {
-        let c = self.client().await?;
-        c.batch_execute(sql).await?;
-        Ok(())
-    }
 
-    pub async fn query_json(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Vec<Value>> {
-        let c = self.client().await?;
-        let rows = c.query(sql, params).await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| r.try_get::<_, Value>(0).unwrap_or(Value::Null))
-            .collect())
-    }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1129,7 +1087,7 @@ pub fn tokenize(q: &str) -> Vec<String> {
     ];
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    let mut push = |cur: &mut String, out: &mut Vec<String>| {
+    let push = |cur: &mut String, out: &mut Vec<String>| {
         if cur.len() >= 3 && !STOP.contains(&cur.as_str()) && !out.contains(cur) {
             out.push(cur.clone());
         }

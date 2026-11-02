@@ -56,6 +56,9 @@ regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 csv = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 futures-util = "0.3"
 bytes = "1"
 # the web surface: static roots, the /__m_hmr socket, the watcher, the wasm

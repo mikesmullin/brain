@@ -8,17 +8,18 @@ decisions assumed throughout: separate entity per ICIJ category CSV +
 (no domain/range), rich typed per-column components, hub nodes uncapped.
 (These originate from the local working plan doc, `tmp/BRAIN_OPTIMIZE.md`.)
 
-> [!CAUTION]
-> **Engine asymmetry, deliberately unexploited.** pgGraph runs inside a real,
-> natively-compiled PostgreSQL 17 server (multi-process, OS-native I/O);
-> brain runs on **pglite — a single-threaded WASM build of Postgres embedded
-> in one Bun process**. Every brain number below carries that handicap, and
-> brain still lands in the equal-or-better category on most paired questions.
-> We could have re-run brain's suite against a full PostgreSQL server (the
-> code is standard SQL; only the connection layer would change) and expect
-> uniformly better numbers — we deliberately did not spend that time, because
-> the WASM results already met or beat the target. Researchers comparing
-> engines should read brain's columns as a *floor*, not a ceiling.
+> [!NOTE]
+> **The v1 handicap is gone.** Runs 1 and 2 below were brain v1 on **pglite —
+> a single-threaded WASM build of Postgres embedded in one Bun process** —
+> against pgGraph's natively-compiled PostgreSQL 17. v1 still landed
+> equal-or-better on most paired questions while carrying that handicap, and
+> the file said at the time that running the same SQL against a real server
+> should produce uniformly better numbers.
+>
+> brain **v2** is that run: Rust, PostgreSQL 18 in a container, same dataset,
+> same seeds, same protocol. Run 3 is therefore the first apples-to-apples
+> comparison in this file, and also a direct v1→v2 measurement, since v1's
+> columns were produced on the same machine against the same data.
 
 **Prime metric (per plan §3.4/§3.5): WARM query wall-time for brain's 5 query
 subcommands, vs. pgGraph's hot timings on the equivalent operations.** Cold
@@ -52,14 +53,23 @@ start and index-build times are recorded as footnotes, not pass/fail bars.
       (keyword FTS + graph only — per plan, we're benchmarking storage/query,
       not the LLM extraction path).
 - [ ] A dedicated bench brain root, e.g. `/workspace/datasets/panama-brain/`
-      (`brain.yaml` + `db/`). Do NOT run this inside a real brain.
+      (`brain.yaml` + `db/`). Do NOT run this inside a real brain. Give it its
+      own `pg.schema:` so it cannot collide with a working brain on the shared
+      server.
+- [ ] **v2:** the shared PostgreSQL running — `brain pg install && brain pg start`.
 
 ## Phase 1 — ETL: ICIJ CSVs → brain dataset
 
-Write a one-shot `bun` script (implemented: `tools/etl-panama.mjs` in this repo;
-the runner + seed-derivation scripts live beside it in `tools/`)
-that emits directly into the bench `db/` (skip `brain load`'s copy step — no
-point writing 2M files twice). Checklist of what it must do:
+In v2 this is a subcommand rather than a script beside the repo, because the
+mapping decisions below are part of what is being compared and belong under
+version control with the engine:
+
+```sh
+brain bench panama-etl --zip full-oldb.LATEST.zip --out /workspace/datasets/panama-brain/db
+```
+
+It emits directly into the bench `db/` (no `brain load` copy step — no point
+writing 2M files twice). What it does, and what the v1 script did before it:
 
 - [ ] Extract the zip (5 node CSVs + `relationships.csv`).
 - [ ] **Classes**: one per category CSV — `Entity`, `Officer`, `Intermediary`,
@@ -97,21 +107,18 @@ point writing 2M files twice). Checklist of what it must do:
       — expected: ~2.02M entities (2,016,523 + nothing extra), ~3.34M edges
       + ~1,150 `SAME_NODE_ID`.
 
-## Phase 2 — Index + serve
+## Phase 2 — Index
 
-- [ ] `export BRAIN_ROOT=/workspace/datasets/panama-brain/db`
-- [ ] `brain reindex --no-embed` — **record wall-time and peak RSS**. This is
-      the moment of truth for pglite-at-2M-rows (WASM memory ceiling, GIN
-      build, bulk insert). If it fails or thrashes, record exactly where —
-      that finding feeds the "revisit pglite" decision in the plan (§1.1) —
-      and try, in order: (a) stream/batch `loadWorld` (don't hold all 2M JS
-      entity objects + all rows simultaneously), (b) direct-to-index ETL
-      (skip `.md`, insert straight into pglite tables, keep `.md` generation
-      as a later `export`), (c) native Postgres for the *build* step only.
-- [ ] `brain server start` (background/tmux) — record startup-to-ready time
-      (cold footnote) and `brain server status` memory_mb.
-- [ ] Smoke: `brain search Mossack` returns rows; `brain server status` shows
-      ~2.02M entities / ~3.34M links.
+- [ ] `brain --db /workspace/datasets/panama-brain reindex --no-embed` —
+      **record wall-time**. In v1 this was the moment of truth for
+      pglite-at-2M-rows (WASM memory ceiling, GIN build, bulk insert) and it
+      cost 447 s at a 19.4 GB peak. v2 parses in parallel with rayon, streams
+      concurrent `COPY` into UNLOGGED tables, and builds the indexes
+      afterwards rather than maintaining them during the load.
+- [ ] A brain server is optional in v2 and the suite does not use one; the
+      database is already a server. Record `brain pg status` for context.
+- [ ] Smoke: `brain --db … search Mossack` returns rows; `brain --db … server
+      status` shows ~2.02M entities / ~2.90M links.
 
 ## Phase 3 — The question suite (mirrors pgGraph's panama workload)
 

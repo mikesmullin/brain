@@ -67,7 +67,7 @@ fn err(invariant: &'static str, subject: impl Into<String>, detail: impl Into<St
 
 // ── field / component ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FieldDef {
     #[serde(default = "default_type")]
     pub r#type: String,
@@ -87,6 +87,24 @@ pub struct FieldDef {
 
 fn default_type() -> String {
     "string".into()
+}
+
+/// Hand-written, not derived. `#[derive(Default)]` would give `type` the empty
+/// string, which is not a declarable type — and the failure surfaces a long way
+/// from the cause: an importer that builds a field with `..Default::default()`
+/// writes a schema that then refuses to load. The serde default and the Rust
+/// default have to agree, so this states it once.
+impl Default for FieldDef {
+    fn default() -> Self {
+        FieldDef {
+            r#type: default_type(),
+            required: false,
+            list: false,
+            description: None,
+            values: Vec::new(),
+            allowed_types: Vec::new(),
+        }
+    }
 }
 fn is_false(b: &bool) -> bool {
     !*b
@@ -590,33 +608,8 @@ impl TBox {
         None
     }
 
-    /// Relations whose declared domain admits `cls` (wildcards included).
-    pub fn out_relations(&self, cls: &str) -> Vec<&str> {
-        let anc: HashSet<String> = self.ancestry(cls).into_iter().collect();
-        self.relations
-            .iter()
-            .filter(|(_, r)| r.domain.as_ref().map_or(true, |d| anc.contains(d)))
-            .map(|(n, _)| n.as_str())
-            .collect()
-    }
 
-    /// Relations whose declared range admits `cls`.
-    pub fn in_relations(&self, cls: &str) -> Vec<&str> {
-        let anc: HashSet<String> = self.ancestry(cls).into_iter().collect();
-        self.relations
-            .iter()
-            .filter(|(_, r)| r.range.as_ref().map_or(true, |d| anc.contains(d)))
-            .map(|(n, _)| n.as_str())
-            .collect()
-    }
 
-    pub fn top_classes(&self) -> Vec<&str> {
-        self.classes
-            .iter()
-            .filter(|(_, c)| c.top)
-            .map(|(n, _)| n.as_str())
-            .collect()
-    }
 
     // ── serialization ────────────────────────────────────────────────────────
 
@@ -870,9 +863,21 @@ impl TBox {
 }
 
 /// Quote a YAML scalar only when it needs it.
+///
+/// The leading-indicator case is not decoration. YAML gives a dozen characters
+/// a special meaning *only in first position*, and the ICIJ dataset contains a
+/// name that begins `- ` — which YAML reads as a sequence item, which makes the
+/// whole mapping invalid, which silently lost 25 entities out of two million
+/// at index time. Anything that starts with an indicator gets quoted, whether
+/// or not that particular one would have been ambiguous here.
 pub fn yaml_scalar(s: &str) -> String {
+    const INDICATOR: &[char] = &[
+        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%',
+        '@', '`',
+    ];
     let needs = s.is_empty()
         || s.contains(['\n', ':', '#', '"', '\'', '{', '}', '[', ']', ',', '&', '*', '!', '|', '>', '%', '@', '`'])
+        || s.starts_with(INDICATOR)
         || s.trim() != s
         || s.parse::<f64>().is_ok()
         || matches!(s, "true" | "false" | "null" | "yes" | "no" | "~" | "on" | "off");

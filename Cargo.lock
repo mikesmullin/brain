@@ -111,6 +111,7 @@ dependencies = [
  "deadpool-postgres",
  "futures-util",
  "hex",
+ "libc",
  "rayon",
  "regex",
  "reqwest",

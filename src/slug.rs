@@ -136,7 +136,3 @@ pub fn placeholder_id(parts: &[&str]) -> String {
     h.update(joined.as_bytes());
     hex::encode(h.finalize())[..8].to_string()
 }
-
-pub fn is_placeholder_id(id: &str) -> bool {
-    id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-}

@@ -9,3 +9,5 @@
 /tools/
 # generated wasm bundle
 /web/pkg/
+# the benchmark dataset lives outside the repo; the ETL rebuilds it
+/bench/

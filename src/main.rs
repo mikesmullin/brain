@@ -28,6 +28,7 @@ fn show(s: &str) {
 }
 
 fn main() {
+    restore_sigpipe();
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // `brain web` runs the rustex1 dev server: synchronous, owns the process,
@@ -81,6 +82,24 @@ fn main() {
     };
     std::process::exit(code);
 }
+
+/// Die quietly when a reader goes away, like every other Unix tool.
+///
+/// Rust ignores `SIGPIPE` at startup, which turns a closed stdout into a write
+/// error, which makes `println!` panic. `brain ls | head` is an ordinary thing
+/// to type, and it should not print a backtrace note. `brain ls` streams
+/// millions of rows, so this is not a corner case.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: setting a signal disposition to the default before any threads
+    // exist is the documented remedy, and SIG_DFL for SIGPIPE is terminate.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
 
 /// Is this invocation `brain web`? Checked before the global flags are peeled,
 /// so it has to skip over their values.

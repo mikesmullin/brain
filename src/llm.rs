@@ -53,9 +53,6 @@ impl Question {
     pub fn noul(instructions: String) -> Question {
         Question { r#type: "noul", criteria: None, stage: None, instructions }
     }
-    pub fn score(instructions: String) -> Question {
-        Question { r#type: "score", criteria: None, stage: None, instructions }
-    }
 }
 
 /// One answer. Exactly one field is populated, decided by the question type.
@@ -171,9 +168,6 @@ impl ChatMessage {
     }
     pub fn assistant(c: impl Into<String>) -> Self {
         ChatMessage { role: "assistant".into(), content: c.into() }
-    }
-    pub fn tool(c: impl Into<String>, id: impl Into<String>) -> Self {
-        ChatMessage { role: format!("tool:{}", id.into()), content: c.into() }
     }
 }
 
