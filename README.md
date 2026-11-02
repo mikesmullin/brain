@@ -35,7 +35,8 @@ Same idea as v1, same data on disk, almost nothing the same underneath.
 | Browser | a WebGL point cloud + a sidebar agent | a wiki, written in Rust → wasm |
 
 The `.md` format is unchanged and `schema.yaml` is read as-is, so migrating a v1
-database is `brain reindex` and nothing else.
+database is `brain reindex` and nothing else. Every v1 subcommand is present
+except `viz`, which `web` replaces.
 
 ## `crawl` — ask in words
 

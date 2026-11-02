@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod config;
 mod convert;
+mod ecs;
 mod index;
 mod llm;
 mod mcp;

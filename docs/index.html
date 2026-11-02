@@ -752,12 +752,16 @@ brain --db /path/to/your/v1/brain reindex</code></pre>
           <tr><td><code>brain viz</code></td><td><code>brain web</code> — a wiki, not a point cloud</td></tr>
           <tr><td><code>db/pgdata/</code></td><td>a schema in the shared instance; <code>brain pg</code></td></tr>
           <tr><td>a server was required</td><td>optional; every command works without one</td></tr>
-          <tr><td><code>brain refine</code></td><td>not carried over — <code>brain validate</code> reports what it would have fixed</td></tr>
-          <tr><td><code>brain call</code> / component methods</td><td>not carried over; the schema still records the surface</td></tr>
+          <tr><td><code>brain refine</code></td><td>kept — the canonical-id half is now native</td></tr>
+          <tr><td><code>brain call</code> / component methods</td><td>kept — the module contract is unchanged</td></tr>
           <tr><td>Bun + CoffeeScript</td><td>one Rust binary</td></tr>
         </tbody>
       </table>
-      <div class="callout note"><p><span class="lbl">Two things from v1 are deliberately absent.</span> <code>refine</code> (per-class repair scripts) and <code>call</code> (component methods) were both <em>dataset-local CoffeeScript</em> — they worked by loading <code>.coffee</code> out of the database directory and running it. That mechanism does not survive the move to a compiled binary, and replacing it with a plugin ABI is a bigger decision than this release. <code>validate</code> reports every condition <code>refine</code> repaired, so nothing is undiagnosed; it just is not automatically fixed.</p></div>
+      <h3>Code the dataset owns</h3>
+      <p><code>call</code> and <code>refine</code> are the two commands that execute code living in the <em>database</em> rather than in brain: <code>components/&lt;Comp&gt;.{mjs,js,coffee}</code> exporting <code>methods</code>, and <code>refiner/&lt;Class&gt;.{mjs,js,coffee}</code> exporting <code>refine</code>. That is the feature, not an implementation detail — the schema says a class <em>has</em> methods, and the dataset says what they do.</p>
+      <p>A compiled binary cannot evaluate CoffeeScript, so brain keeps the contract and changes the mechanism: the module is run by an <strong>interpreter</strong> (<code>bun</code>, else <code>node</code>, else <code>$BRAIN_JS</code>) with the project root as its working directory, so the dataset's own <code>node_modules</code> resolve. Brain hands it the entity as JSON and reads the result back. Your v1 modules load unchanged; a <code>.coffee</code> one needs <code>bun</code> with <code>bun-coffeescript</code> installed in the project, exactly as before.</p>
+      <p>The dependency is <em>conditional</em>: a brain with no <code>components/</code> and no <code>refiner/</code> never needs an interpreter, and most brains have neither.</p>
+      <div class="callout note"><p><span class="lbl">Most of what refiners did is now native.</span> The bulk of v1's refiner work was <code>canonicalizeIds</code> — derive an entity's id from its class's <code>idField</code>, rename the file when the two disagree, rewrite every edge that pointed at the old slug, and merge what collides. None of that needs a model or a script, so it runs in Rust whether or not an interpreter exists. <code>--dry-run</code> prints the renames and changes nothing.</p></div>
     </section>
 
     <!-- ============================ READING ============================ -->

@@ -877,6 +877,9 @@ pub fn yaml_scalar(s: &str) -> String {
     ];
     let needs = s.is_empty()
         || s.contains(['\n', ':', '#', '"', '\'', '{', '}', '[', ']', ',', '&', '*', '!', '|', '>', '%', '@', '`'])
+        // a raw control character is not legal in a plain scalar either, and
+        // deciding to quote is a separate question from how to escape
+        || s.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
         || s.starts_with(INDICATOR)
         || s.trim() != s
         || s.parse::<f64>().is_ok()
@@ -892,6 +895,13 @@ pub fn yaml_scalar(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // Every other C0 control, and DEL. YAML forbids a raw control
+            // character even inside a double-quoted scalar, and real data has
+            // them: ICIJ address 171171 is "P.\x0fO. Box 5090 Napa, California",
+            // which cost exactly one entity out of two million before this.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
             c => out.push(c),
         }
     }

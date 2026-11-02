@@ -49,16 +49,24 @@ impl Ctx {
         let slot = Slot::new(&brain.config.llm)?;
         let chat = Chat::new(&brain.config.llm)?;
         let ctx = Ctx { brain, tbox, store, slot, chat, embedder };
+        // Build only when the index is empty AND there is something to put in
+        // it. A brain that has a schema and no entities yet — every brain, for
+        // its first few commands — is not a brain with a stale index, and
+        // announcing a rebuild of nothing on every `def` is just noise.
         if ctx.store.is_empty().await? {
-            eprintln!("index is empty — building it once …");
-            let r = index::reindex(&ctx.brain, &ctx.tbox, &ctx.store, ctx.embedder.as_ref(), false).await?;
-            eprintln!(
-                "indexed {} entities / {} edges in {:.1}s",
-                r.entities,
-                r.links,
-                r.total_ms as f64 / 1000.0
-            );
-            index::record_disk_fingerprint(&ctx.brain, &ctx.store).await?;
+            let files = index::enumerate(&ctx.brain, &ctx.tbox)?.len();
+            if files > 0 {
+                eprintln!("index is empty — building it once from {files} file(s) …");
+                let r =
+                    index::reindex(&ctx.brain, &ctx.tbox, &ctx.store, ctx.embedder.as_ref(), true).await?;
+                eprintln!(
+                    "indexed {} entities / {} edges in {:.1}s",
+                    r.entities,
+                    r.links,
+                    r.total_ms as f64 / 1000.0
+                );
+                index::record_disk_fingerprint(&ctx.brain, &ctx.store).await?;
+            }
         }
         Ok(ctx)
     }
@@ -100,6 +108,8 @@ pub async fn dispatch(cmd: &str, argv: &[String], g: &Global) -> Result<i32> {
         "ls" => ls_cmd(argv, g).await,
         "rm" => rm_cmd(argv, g).await,
         "validate" => validate_cmd(argv, g).await,
+        "call" => crate::ecs::call(&Ctx::open(g).await?, argv).await,
+        "refine" => crate::ecs::refine(&Ctx::open(g).await?, argv).await,
         "reindex" => reindex_cmd(argv, g).await,
         "export" => export_cmd(argv, g).await,
         "load" => load_cmd(argv, g).await,
@@ -413,6 +423,7 @@ async fn schema_cmd(argv: &[String], g: &Global) -> Result<i32> {
                 }
             }
         }
+        "methods" => return crate::ecs::print_methods(&ctx, name.as_deref()),
         "orphans" => {
             let limit = a.num("limit").unwrap_or(500);
             let rows = ctx.store.orphans(limit).await?;
@@ -553,16 +564,16 @@ async fn def_cmd(argv: &[String], g: &Global) -> Result<i32> {
                     qualifiers.extend(fields_from_flow(&format!("{{{}: {}}}", qs[0], flow))?);
                 }
             }
-            let chain: Vec<String> = match a.get("chain") {
-                Some(first) => {
-                    let mut v = vec![first.to_string()];
-                    if let Some(second) = a.positional.get(if kind == "relation" { 5 } else { 0 }) {
-                        v.push(second.clone());
-                    }
-                    v
-                }
-                None => vec![],
-            };
+            // `--chain A,B` or `--chain A --chain B`. Deliberately not
+            // `--chain A B`: a bare second word is indistinguishable from a
+            // positional, so which one it was would depend on where the flag
+            // appeared in the line.
+            let chain: Vec<String> = a
+                .get_all("chain")
+                .iter()
+                .flat_map(|v| v.split(',').map(|x| x.trim().to_string()))
+                .filter(|x| !x.is_empty())
+                .collect();
             tb.relations.insert(
                 name.clone(),
                 RelationDef {

@@ -34,6 +34,7 @@ enumerate your schema:
   schema components     component(s): fields + methods
   schema classes        class(es): components / top / idField
   schema relations      relation(s): domain / range / cardinality / OWL axioms
+  schema methods        component methods applicable to a class
   schema turtle         the T-box as Turtle (the W3C seam) or TSV triples
   schema orphans        entities with zero relations
 
@@ -49,6 +50,7 @@ fill your data: (A-BOX / VALUES)
   link        attach a relationship to an entity
   get         print an entity
   rm          remove an entity
+  call        invoke a component method on an entity
 
 work with external data:
   ingest      recursively read .md docs, auto-creating entities and schema (LLM)
@@ -64,6 +66,7 @@ run your brain: (SERVER MODE — one process owns the connection pool)
 
 verify brain integrity:
   validate    report linter findings for all entities
+  refine      complete + de-dupe entities; canonicalize ids
   bench       run a dataset's benchmark suite (see docs/BENCHMARK.md)
 
 query your brain: (all 6 run against the index — milliseconds)
@@ -100,7 +103,7 @@ Examples:
     brain init --ontology dstwiki     # ...naming the ontology
 "#,
         "schema" => r#"Usage:
-    brain schema <graph|uniq|components|classes|relations|turtle|tsv|orphans> [<name>]
+    brain schema <graph|uniq|components|classes|relations|methods|turtle|tsv|orphans> [<name>]
 
 Description:
     Inspect the T-box (schema). With no <name>, most subcommands print everything.
@@ -111,6 +114,7 @@ Subcommands:
     components [<Comp>]  component(s): their fields
     classes    [<Class>] class(es): their components / top / idField / parent
     relations  [<REL>]   relation(s): domain / range / cardinality / OWL axioms
+    methods    [<Class>] component methods callable on a class
     turtle               the whole T-box as Turtle (owl:/rdfs: vocabulary)
     tsv                  the same axioms as subject<TAB>predicate<TAB>object
     orphans              entities with no relations
@@ -126,7 +130,7 @@ Examples:
     brain def class <Name> [--components alias:Component ...] [--top] [--parent <Class>] [--id-field <path>]
     brain def relation <REL> <domain> <cardinality> <range> [--qualifiers <name> '<yamlflow>' ...]
                        [--transitive] [--symmetric] [--functional]
-                       [--inverse-of <REL>] [--sub-property-of <REL>] [--chain <REL> <REL>]
+                       [--inverse-of <REL>] [--sub-property-of <REL>] [--chain <REL>,<REL>]
 
 Description:
     Declare schema structure (the T-box): components, classes, and relations.
@@ -146,7 +150,7 @@ Options:
     --functional        owl:FunctionalProperty (requires oto or nto)
     --inverse-of        owl:inverseOf          (ends must swap)
     --sub-property-of   rdfs:subPropertyOf     (parent must be mtm)
-    --chain A B         owl:propertyChainAxiom (range(A) must equal domain(B))
+    --chain A,B         owl:propertyChainAxiom (range(A) must equal domain(B))
 
 Examples:
     brain def component Naming --fields '{name: {type: string, required: true}}'
@@ -154,6 +158,7 @@ Examples:
     brain def relation SUPPORTS Team mtm Product --qualifiers role '{type: string}'
     brain def relation PART_OF Region mtm Region --transitive
     brain def relation OWNED_BY Product mtm Franchise --inverse-of OWNS
+    brain def relation GRANDPARENT_OF Person mtm Person --chain PARENT_OF,PARENT_OF
 "#,
         "new" => r#"Usage:
     brain new <Class> <REL>=<slug> | <alias.field>=<value> ...
@@ -224,6 +229,54 @@ Options:
 Examples:
     brain get Person/jdoe
     brain get Person/jdoe --links
+"#,
+        "call" => r#"Usage:
+    brain call <slug> <method> [<params>]
+
+Description:
+    Invoke an ECS component method on an entity. <params> is YAML-flow (the
+    outer {} is optional). Discover a class's methods with
+    `brain schema methods <Class>`.
+
+    A component method lives in the DATABASE, not in brain: a module at
+    `components/<Comp>.{mjs,js,coffee}` beside db/, exporting `methods`. brain
+    executes it with `bun`, else `node`, else $BRAIN_JS — run from the project
+    root so the dataset's own dependencies resolve — hands it the entity as
+    JSON, and writes back what the method changed. A brain with no
+    `components/` never needs an interpreter.
+
+    Only components and the body are adopted from the result. A method that
+    rewired the graph would bypass schema validation on the relation, and
+    `link` is the command for that.
+
+Examples:
+    brain schema methods EntityJournal
+    brain call EntityJournal/jdoe Entry__list
+    brain call EntityJournal/jdoe Entry__add 'msg: kicked off the migration'
+"#,
+        "refine" => r#"Usage:
+    brain refine [--class <Class>] [--max-passes N] [--dry-run]
+
+Description:
+    Repair pass, in two halves.
+
+    NATIVE, always: canonical ids. A class that declares an `idField` says what
+    its entities are called, so a file whose name disagrees is misnamed. refine
+    renames it, rewrites every edge that pointed at the old slug, and merges
+    whatever now collides.
+
+    SCRIPTED, when the dataset has one: `refiner/<Class>.{mjs,js,coffee}`
+    exporting `refine(entity, ctx)`. Same execution model as `brain call` —
+    see `brain help call`. Skipped, with a note, when no interpreter is found.
+
+Options:
+    --class        restrict to a single class
+    --max-passes   bound the iterative relation-chain recursion (default: 4)
+    --dry-run      print the renames and change nothing
+
+Examples:
+    brain refine
+    brain refine --class Person --dry-run
 "#,
         "rm" => r#"Usage:
     brain rm <slug> [<slug> ...] [--keep-file]
@@ -654,7 +707,7 @@ pub fn peel_global(argv: Vec<String>) -> Result<(Global, Vec<String>)> {
 pub const COMMANDS: &[&str] = &[
     "init", "def", "schema", "new", "set", "link", "get", "ls", "rm", "validate", "reindex",
     "export", "load", "convert", "pg", "server", "search", "ingest", "enrich", "graph", "think",
-    "ontology", "graphql", "crawl", "web", "mcp", "use", "bench",
+    "ontology", "graphql", "crawl", "web", "mcp", "use", "bench", "call", "refine",
 ];
 
 /// Small helper for the hand-rolled flag parsing each command does.
