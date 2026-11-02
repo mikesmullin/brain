@@ -119,9 +119,20 @@ fn resolve_many<'a>(
         let by_slug: HashMap<String, &crate::store::EntityRow> =
             rows.iter().map(|r| (r.slug.to_lowercase(), r)).collect();
 
-        // one links query for the whole level
+        // one links query for the whole level, narrowed to the relations this
+        // selection actually names. Without the narrowing, projecting one
+        // relation off a 36,284-edge hub fetched all 36,284 to find 30.
         let canonical: Vec<String> = rows.iter().map(|r| r.slug.clone()).collect();
-        let edges = store.expand(&canonical, true, 1_000_000).await?;
+        let wanted: Vec<String> = sel
+            .iter()
+            .filter(|i| crate::slug::is_relation_name(&i.name))
+            .map(|i| i.name.clone())
+            .collect();
+        let edges = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            store.expand_rel(&canonical, true, 1_000_000, Some(&wanted)).await?
+        };
         let mut outs: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
         for e in edges {
             outs.entry(e.from.to_lowercase())

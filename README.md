@@ -118,8 +118,23 @@ no page reload; saving `web/styles.css` costs zero redraws.
 
 ## Benchmark
 
-2,017,662 nodes / 3.3M edges of ICIJ Offshore Leaks data, against the same
-questions pgGraph's harness uses. Protocol, parity caveats and results:
+2,017,662 entities / 2.90M edges of ICIJ Offshore Leaks data, against the same
+questions pgGraph's harness uses. Warm medians, same machine, same seeds:
+
+| Question | v1 (pglite) | v2 | pgGraph |
+|---|---|---|---|
+| status / graph size | 3.9 ms | **0.2 ms** | 47 ms |
+| two-hop neighbourhood, capped 500 | 58 ms | 62 ms | 231 ms |
+| two-hop neighbourhood, uncapped | **334 ms** | 534 ms | 4,510 ms |
+| one-hop projection (the query DSL) | 6 ms | **1.8 ms** | 1,458 ms |
+| shortest path, 1 hop | 64 ms | 51 ms | **4.1 ms** |
+| text search, ranked top-20 | 601 ms | 430 ms | **193 ms** |
+| index build | 447 s, 19.4 GB peak | **105 s** | 52–90 s |
+
+One question got slower than v1 and the cause is measured, not guessed: the
+uncapped walk sends a 36,256-string parameter back to the server on its second
+hop, and pglite — running inside the process — never paid for that. Protocol,
+every attempted fix and its measurement:
 [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ```sh

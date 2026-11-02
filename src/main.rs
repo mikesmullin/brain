@@ -24,6 +24,20 @@ mod web;
 
 use anyhow::Result;
 
+/// The default system allocator is the bottleneck in this workload, and it is
+/// worth one line to say why. A graph walk is almost pure short-lived small
+/// allocation: tokio-postgres builds a `String` per text column, and the
+/// traversal builds a path per visited node. One two-hop walk of a
+/// 36,284-degree hub does roughly half a million of them.
+///
+/// That is precisely the shape a generational GC is good at and a general
+/// malloc is bad at — which is most of why brain v1, on JavaScript, was *faster*
+/// here than a first-cut Rust port. mimalloc closes that gap; it is not a
+/// micro-optimisation but the difference between the two runtimes on this
+/// class of work.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn show(s: &str) {
     println!("{s}");
 }

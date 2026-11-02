@@ -320,7 +320,11 @@ async fn enumerate(
             capped = true;
             break;
         }
-        let slugs: Vec<String> = crate::store::dedupe(frontier.iter().map(|(s, _, _)| s.clone()).collect());
+        // The frontier is unique by construction — a node only enters it when
+        // `seen.insert` succeeded — so deduping it again costs two allocations
+        // and a lowercase conversion per node for nothing. At a 36k-degree hub
+        // that is 72,000 allocations a hop.
+        let slugs: Vec<String> = frontier.iter().map(|(s, _, _)| s.clone()).collect();
         let room = (budget - visited as i64).max(1);
         let edges = if undirected {
             store.expand_both(&slugs, room).await?
@@ -357,19 +361,36 @@ async fn enumerate(
                 if path.iter().any(|p| p == *to) {
                     continue;
                 }
-                let mut p2 = path.clone();
-                p2.push(to.to_string());
-                let mut v2 = via.clone();
-                v2.push(r.to_string());
+                // Build the extended path ONCE. It used to be cloned twice more
+                // — once into the result and once into the next frontier — and
+                // at 75,000 paths those clones were most of the walk's cost.
+                let mut p2 = Vec::with_capacity(path.len() + 1);
+                p2.extend_from_slice(path);
+                p2.push((*to).to_string());
+                let mut v2 = Vec::with_capacity(via.len() + 1);
+                v2.extend_from_slice(via);
+                v2.push((*r).to_string());
+                let hops = p2.len() - 1;
+                let is_new = !seen.contains(*to);
                 if matches(tbox, target, to) {
-                    paths.push(Path { nodes: p2.clone(), via: v2.clone(), hops: p2.len() - 1 });
+                    if is_new {
+                        paths.push(Path { nodes: p2.clone(), via: v2.clone(), hops });
+                    } else {
+                        // nothing downstream needs them: move rather than copy
+                        paths.push(Path { nodes: p2, via: v2, hops });
+                        if paths.len() >= want {
+                            return Ok((paths, visited, capped));
+                        }
+                        continue;
+                    }
                     if paths.len() >= want {
                         return Ok((paths, visited, capped));
                     }
                 }
-                if seen.insert(to.to_string()) {
+                if is_new {
+                    seen.insert((*to).to_string());
                     visited += 1;
-                    next.push((to.to_string(), p2, v2));
+                    next.push(((*to).to_string(), p2, v2));
                 }
             }
         }

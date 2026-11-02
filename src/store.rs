@@ -712,27 +712,56 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
     }
 
     /// One frontier expansion. `out = true` walks `from -> to`.
+    ///
+    /// Qualifiers are deliberately NOT selected. Traversal reads thethree text
+    /// columns and nothing else, and a jsonb per edge is decoded into a
+    /// `serde_json::Value` on the client for every row — 75,000 of them on one
+    /// two-hop walk of a 36k-degree hub. `out_edges` / `in_edges` fetch them,
+    /// because a page that renders an edge is the only thing that wants them.
+    ///
+    /// `rels` narrows the walk server-side. A projection that names one
+    /// relation should not drag back 36,284 edges to find 30 of them.
     pub async fn expand(&self, frontier: &[String], out: bool, cap: i64) -> Result<Vec<LinkRow>> {
+        self.expand_rel(frontier, out, cap, None).await
+    }
+
+    pub async fn expand_rel(
+        &self,
+        frontier: &[String],
+        out: bool,
+        cap: i64,
+        rels: Option<&[String]>,
+    ) -> Result<Vec<LinkRow>> {
         if frontier.is_empty() {
             return Ok(vec![]);
         }
         let c = self.client().await?;
         let s = self.s();
         let col = if out { "from_slug" } else { "to_slug" };
-        let rows = c
-            .query(
-                &format!(
-                    "SELECT from_slug,rel,to_slug,qualifiers FROM {s}.links
-                      WHERE {col} = ANY($1) LIMIT $2"
-                ),
-                &[&frontier, &cap],
-            )
-            .await?;
-        Ok(rows.into_iter().map(row_to_link).collect())
+        let rows = match rels {
+            None => {
+                c.query(
+                    &format!("SELECT from_slug,rel,to_slug FROM {s}.links WHERE {col} = ANY($1) LIMIT $2"),
+                    &[&frontier, &cap],
+                )
+                .await?
+            }
+            Some(r) => {
+                c.query(
+                    &format!(
+                        "SELECT from_slug,rel,to_slug FROM {s}.links
+                          WHERE {col} = ANY($1) AND rel = ANY($2) LIMIT $3"
+                    ),
+                    &[&frontier, &r, &cap],
+                )
+                .await?
+            }
+        };
+        Ok(rows.into_iter().map(row_to_edge).collect())
     }
 
     /// Both directions in one round trip — what `graph`'s undirected mode and
-    /// the wiki's "related" panel want.
+    /// the search expansion want. No qualifiers, for the reason above.
     pub async fn expand_both(&self, frontier: &[String], cap: i64) -> Result<Vec<LinkRow>> {
         if frontier.is_empty() {
             return Ok(vec![]);
@@ -742,13 +771,13 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         let rows = c
             .query(
                 &format!(
-                    "SELECT from_slug,rel,to_slug,qualifiers FROM {s}.links
+                    "SELECT from_slug,rel,to_slug FROM {s}.links
                       WHERE from_slug = ANY($1) OR to_slug = ANY($1) LIMIT $2"
                 ),
                 &[&frontier, &cap],
             )
             .await?;
-        Ok(rows.into_iter().map(row_to_link).collect())
+        Ok(rows.into_iter().map(row_to_edge).collect())
     }
 
     pub async fn top_degree(&self, n: i64) -> Result<Vec<(String, i64)>> {
@@ -991,6 +1020,10 @@ fn row_to_link(r: tokio_postgres::Row) -> LinkRow {
     LinkRow { from: r.get(0), rel: r.get(1), to: r.get(2), qualifiers: r.get(3) }
 }
 
+fn row_to_edge(r: tokio_postgres::Row) -> LinkRow {
+    LinkRow { from: r.get(0), rel: r.get(1), to: r.get(2), qualifiers: Value::Null }
+}
+
 /// Postgres text-format COPY: tab-separated, `\N` for null, backslash escapes.
 fn push_row(buf: &mut String, cols: &[&str]) {
     for (i, c) in cols.iter().enumerate() {
@@ -1119,11 +1152,6 @@ pub fn rrf(lists: &[Vec<(String, f64)>], k: f64) -> Vec<(String, f64)> {
     v
 }
 
-/// Convenience: dedupe preserving order.
-pub fn dedupe(v: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    v.into_iter().filter(|x| seen.insert(x.to_lowercase())).collect()
-}
 
 /// Reconstruct a full `Entity` (components + both edge directions) for display.
 pub async fn hydrate(store: &Store, slug: &str) -> Result<Option<(Entity, Vec<LinkRow>)>> {

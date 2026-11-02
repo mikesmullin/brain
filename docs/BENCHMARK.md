@@ -337,3 +337,107 @@ block at the top) — deferred until a use-case demands it.
 equivalent yet. The feature plan — a `brain server components` maintenance
 op plus a real-time browser-based graph explorer — lives in the project's
 working plan document.*
+
+---
+
+## RESULTS — Run 3 (2026-11-01): brain **v2**, native PostgreSQL
+
+The run the caution block at the top of this file promised: same machine, same
+dataset, same seeds, same 1-warmup + 10-iteration protocol, with the WASM
+handicap removed. brain v2 is Rust against PostgreSQL 18 (pgvector) in a
+rootless podman container; `--no-embed`, no brain server (v2 does not need one).
+
+Seed A resolved to `Officer/54662` — **the same node v1 and pgGraph picked**,
+derived independently by v2's own `bench panama` — and the uncapped two-hop walk
+visits **36,846 nodes**, exactly v1's figure. Correctness parity first: the two
+versions are answering the same question before any timing is compared.
+
+### Dataset parity
+
+| | v1 | v2 |
+|---|---|---|
+| entities | 2,017,662 | **2,017,662** |
+| edges (deduped) | 2,904,000 | **2,901,722** + 1,139 `SAME_NODE_ID` |
+| raw relationship rows accounted for | 3,339,267 | **3,339,267** = 2,901,722 + 437,545 duplicate + 0 unresolvable |
+
+The 2,278-edge difference against v1 is unexplained and under 0.08%; v2 states
+its own arithmetic so the three numbers can be checked against each other.
+
+### Head-to-head (warm medians)
+
+| Question | v1 (pglite) | **v2** | pgGraph | v2 vs v1 | v2 vs pgGraph |
+|---|---|---|---|---|---|
+| Q1 status / graph size | 3.9 ms | **0.2 ms** | 47 ms | **20× better** | **235× better** |
+| Q2 search "Mossack" (top-20) | 601 ms | **430 ms** | 193 ms | **1.4× better** | 2.2× worse |
+| Q3a two-hop neighbourhood, capped 500 | 58 ms | 62 ms | 231 ms | ~parity | **3.7× better** |
+| Q3b two-hop neighbourhood, uncapped | 334 ms | 534 ms | 4,510 ms | **1.6× worse** | **8.4× better** |
+| Q4 one-hop projection (the GQL pair) | 6 ms | **1.8 ms** | 1,458–1,882 ms | **3.3× better** | **810× better** |
+| Q5 shortest path, 1-hop target | 64 ms | **51 ms** | 4.1 ms | **1.25× better** | 12× worse |
+| Q5 shortest path, 3-hop target | 66 ms | 141 ms | 4.1 ms | n/a — different target | 34× worse |
+
+Q5's 3-hop row is not comparable across versions: v2 derives target C itself and
+landed on a different node. It is reported rather than dropped.
+
+### One-time costs
+
+| | v1 | v2 |
+|---|---|---|
+| ETL (zip → 2M `.md`) | 99.7 s | 141 s |
+| `reindex --no-embed` | 447 s, **19.4 GB peak RSS** | **104.5 s**, no measured peak |
+| index on disk | — | 3.9 GB (one PostgreSQL schema) |
+
+The reindex is **4.3× faster** and no longer has a memory ceiling to worry
+about: v1 held 2M entity objects and all rows in one WASM heap, v2 parses in
+parallel with rayon and streams concurrent `COPY` into UNLOGGED tables, building
+the indexes afterwards instead of maintaining them during the load. The ETL is
+slower because it now deduplicates edges and re-reads each file to append them.
+
+### The one regression, measured rather than excused
+
+**Q3b is 1.6× slower than v1, and the cause is the architecture change itself.**
+Instrumenting the hops:
+
+```
+hop 0:      1 frontier,  36,284 edges   sql  49.9 ms   loop 107.5 ms
+hop 1: 36,256 frontier,  39,003 edges   sql 227.2 ms   loop 101.3 ms
+```
+
+277 ms of the 534 is SQL, and hop 1's 227 ms is one query whose *parameter* is
+36,256 strings. Server-side that query is ~100 ms (measured directly in psql);
+the rest is wire encoding and 39,003 rows coming back across a socket. **v1
+never paid any of it** — pglite ran inside the same process, so a per-hop query
+cost index probing and nothing else. For a frontier this wide, in-process beats
+out-of-process, and that is the honest trade for everything else on this page.
+
+Four things were tried against it, and the measurements are the point:
+
+| attempt | result | kept |
+|---|---|---|
+| stop fetching `qualifiers` during traversal (jsonb per edge, never read) | no change on Q3b, helps elsewhere | yes — it is right regardless |
+| drop a redundant dedupe of an already-unique frontier | 642 → 530 ms | yes |
+| mimalloc as the global allocator | 530 → 501 ms | yes — small but free |
+| do both hops in ONE recursive CTE (143 ms of SQL, vs 277 ms) | 497 → 460 ms, and 28 of 75,315 paths differed | **no** |
+
+The recursive CTE is the interesting one. It really does halve the SQL, but the
+path reconstruction gives most of it back, it leaves a 0.04% output difference
+nobody could account for, and it adds a second traversal implementation to keep
+in step with the first. A 7% gain is not worth an engine whose output you cannot
+fully explain.
+
+What *did* pay enormously was narrowing a projection by relation server-side:
+Q4 went from 117 ms to 1.8 ms once `graphql` stopped fetching all 36,284 edges
+of a hub to find the 30 it was asked for.
+
+### Verdict
+
+Against **pgGraph** — the comparison this file exists for — v2 is better
+everywhere v1 was, by more: **235× on status, 3.7× and 8.4× on neighbourhood
+enumeration, 810× on the query DSL.** It remains behind on text search (2.2×,
+while doing strictly more work: IDF-weighted `ts_rank_cd` over a banded tsvector
+against a `contains` scan) and on point-to-point shortest path (12×, against an
+in-memory CSR bidirectional BFS).
+
+Against **v1**, five of seven questions improved and one regressed, for a reason
+that is now measured rather than suspected. Sub-second warm answers on every
+question class at two million nodes still holds — and the index now builds in
+under two minutes instead of seven and a half.

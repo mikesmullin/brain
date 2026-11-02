@@ -672,20 +672,22 @@ brain --use ada mcp      <span class="c"># pin this process to one brain, whatev
     <section id="benchmark">
       <h2><span class="bullet"></span>Benchmark: 2M nodes <a class="anchor" href="#benchmark">#</a></h2>
       <p class="kicker">The Panama Papers, head-to-head with a native Postgres graph engine</p>
-      <p>brain's performance claims are measured, not vibes: the full ICIJ Offshore Leaks dataset (<strong>2,016,523 nodes / 3,339,267 relationship rows</strong>) loaded as a brain database and benchmarked question-for-question against <a href="https://github.com/Evokoa/pgGraph">pgGraph</a>, a CSR-based graph engine running inside a native PostgreSQL 17 server — while brain ran on single-threaded WASM pglite. Warm medians, identical seeds:</p>
+      <p>brain's performance claims are measured, not vibes: the full ICIJ Offshore Leaks dataset (<strong>2,017,662 entities / 2.90M deduped edges</strong>, every one of 3,339,267 raw relationship rows accounted for) loaded as a brain database and benchmarked question-for-question against <a href="https://github.com/Evokoa/pgGraph">pgGraph</a>, a CSR-based graph engine inside a native PostgreSQL 17 server. Warm medians, 1 warmup + 10 iterations, identical seeds — v2 derives seed A itself and lands on <code>Officer/54662</code>, the same node v1 and pgGraph picked.</p>
       <table>
-        <thead><tr><th>Question</th><th>brain</th><th>pgGraph</th></tr></thead>
+        <thead><tr><th>Question</th><th>v1 (pglite)</th><th>v2</th><th>pgGraph</th></tr></thead>
         <tbody>
-          <tr><td>Status / graph size</td><td><b>3.9 ms</b></td><td>47 ms</td></tr>
-          <tr><td>Two-hop neighborhood of a 36k-degree hub (capped 500)</td><td><b>58 ms</b></td><td>231 ms</td></tr>
-          <tr><td>Two-hop neighborhood, uncapped</td><td><b>334 ms</b> (36,846 nodes)</td><td>4,510 ms (96,546 nodes)</td></tr>
-          <tr><td>Point projection through the query DSL</td><td><b>6 ms</b></td><td>1,458–1,882 ms</td></tr>
-          <tr><td>Shortest path (1–3 hops)</td><td>64–66 ms</td><td><b>4.1 ms</b></td></tr>
-          <tr><td>Text search ("Mossack", ranked)</td><td>598 ms (hybrid + fusion)</td><td><b>193 ms</b> (contains scan)</td></tr>
+          <tr><td>Status / graph size</td><td>3.9 ms</td><td><b>0.2 ms</b></td><td>47 ms</td></tr>
+          <tr><td>Two-hop neighborhood of a 36k-degree hub (capped 500)</td><td>58 ms</td><td><b>62 ms</b></td><td>231 ms</td></tr>
+          <tr><td>Two-hop neighborhood, uncapped (36,846 nodes)</td><td><b>334 ms</b></td><td>534 ms</td><td>4,510 ms</td></tr>
+          <tr><td>One-hop projection through the query DSL</td><td>6 ms</td><td><b>1.8 ms</b></td><td>1,458–1,882 ms</td></tr>
+          <tr><td>Shortest path, 1-hop target</td><td>64 ms</td><td>51 ms</td><td><b>4.1 ms</b></td></tr>
+          <tr><td>Text search ("Mossack", ranked top-20)</td><td>601 ms</td><td>430 ms</td><td><b>193 ms</b></td></tr>
+          <tr><td>Index build (<code>reindex --no-embed</code>)</td><td>447 s, 19.4 GB peak</td><td><b>105 s</b></td><td>52–90 s (<code>graph.build</code>)</td></tr>
         </tbody>
       </table>
-      <p class="muted">Full methodology, parity caveats, and reproduction steps: <a href="https://github.com/mikesmullin/brain/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>. One-time costs on the same dataset: ETL 100 s · reindex 447 s · connected components 204 s · viz layout 13 s; the resident server idles at ~370 MB.</p>
-      <div class="callout why"><p><span class="lbl">The point isn't beating a native engine everywhere.</span> It's that a git-friendly, Markdown-backed, zero-external-service knowledge graph answers every question class in sub-second warm time at two million nodes — on an embedded WASM database. Load the same dataset yourself: <code>brain load</code> + the ETL script in the repo.</p></div>
+      <p class="muted">Full methodology, parity caveats, every attempted optimisation and its measurement: <a href="BENCHMARK.md">docs/BENCHMARK.md</a>. Reproduce with <code>brain bench panama-etl</code> then <code>brain bench panama</code>.</p>
+      <div class="callout why"><p><span class="lbl">One question got slower, and the reason is the architecture.</span> The uncapped two-hop walk is 1.6× slower than v1. Instrumenting it: 277 ms of the 534 is SQL, and 227 ms of <em>that</em> is one query whose parameter is 36,256 strings — ~100 ms of server-side index probing plus wire encoding and 39,003 rows across a socket. <strong>v1 never paid any of it</strong>, because pglite ran inside the same process. For a frontier that wide, in-process beats out-of-process; that is the honest cost of the move, and it buys the 4.3× faster index build, the vanished memory ceiling, and every other row in the table.</p></div>
+      <div class="callout note"><p><span class="lbl">The point isn't beating a native engine everywhere.</span> It's that a git-friendly, Markdown-backed, zero-external-service knowledge graph answers every question class in sub-second warm time at two million nodes. Against pgGraph, v2 is better everywhere v1 was and by more — 235× on status, 3.7× and 8.4× on neighbourhood enumeration, 810× on the query DSL — and still behind on text search (while doing strictly more ranking work) and on point-to-point shortest path (against an in-memory CSR BFS).</p></div>
     </section>
 
     <!-- ============================= LAYOUT ============================ -->

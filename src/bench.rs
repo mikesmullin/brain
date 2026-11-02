@@ -400,11 +400,27 @@ async fn panama_suite(a: &Args, g: &Global) -> Result<i32> {
             slug
         }
     };
-    // Target B: any neighbour. Target C: a node 3–4 hops out.
+    // Target B: any neighbour. Target C: a node exactly three hops out.
+    //
+    // Found by walking three hops once and taking the deepest path, not by
+    // stepping edge by edge: most of this hub's neighbours are leaves (ICIJ
+    // runs Officer -> Entity and stops), so a greedy walk dead-ends almost
+    // immediately. BFS emits level by level, so the deep paths are at the end.
     let out = ctx.store.expand(&[seed.clone()], true, 1).await?;
     let target_b = out.first().map(|l| l.to.clone());
-    let probe = query::graph::run(&ctx.store, &ctx.tbox, &format!("{seed} *4> * --limit 2000")).await?;
-    let target_c = probe.paths.iter().find(|p| p.hops >= 3).map(|p| p.nodes.last().cloned().unwrap_or_default());
+    let probe = query::graph::run(
+        &ctx.store,
+        &ctx.tbox,
+        &format!("{seed} *3> * --max-nodes 300000"),
+    )
+    .await?;
+    let target_c = probe
+        .paths
+        .iter()
+        .rev()
+        .find(|p| p.hops == 3)
+        .and_then(|p| p.nodes.last().cloned());
+
     if let Some(b) = &target_b {
         println!("target B (1 hop):  {b}");
     }

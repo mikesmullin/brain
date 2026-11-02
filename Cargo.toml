@@ -56,6 +56,7 @@ regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 csv = "1"
+mimalloc = "0.1.52"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
