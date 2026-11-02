@@ -113,8 +113,11 @@ a table called `entities`.
 One page per entity, its relations as links, and a search bar that runs `crawl`.
 The frontend is Rust compiled to wasm, rendering through [m-js] on the
 [`rustex1`](vendor/rustex1) kit — there is no JavaScript here except the kit's
-two bridge files. Saving `app/**.rs` hot-swaps the wasm in under a second with
-no page reload; saving `web/styles.css` costs zero redraws.
+two bridge files. Saving `app/**.rs` hot-swaps the wasm in 398 ms with no page reload; saving
+`web/styles.css` costs zero redraws. The third tier — a backend `src/**.rs`
+change — rebuilds but does not reliably re-exec, because the dev server
+restarts via `current_exe()` and the build has already replaced that file;
+restart `./dev.sh` after a backend change.
 
 ## Benchmark
 

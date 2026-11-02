@@ -620,10 +620,11 @@ EOF
         <tbody>
           <tr><td><code>app/**.rs</code></td><td>cargo + wasm-bindgen (~0.4s), then <code>__M_BOOT__(t)</code> — <strong>no page reload, stores kept</strong></td></tr>
           <tr><td><code>web/styles.css</code></td><td>the <code>&lt;link&gt;</code> is cache-busted in place — <strong>zero redraws</strong></td></tr>
-          <tr><td><code>src/**.rs</code></td><td>cargo build, then the process re-execs itself and the client reconnects</td></tr>
+          <tr><td><code>src/**.rs</code></td><td>cargo build, then the process re-execs itself — <em>see the caveat below</em></td></tr>
         </tbody>
       </table>
       <p class="muted">A compile error does not kill the dev server and does not cover the page: cargo's stderr goes to the terminal, the last good build keeps running underneath, and the browser gets a one-line flash.</p>
+      <div class="callout note"><p><span class="lbl">The backend tier is the shakiest of the three.</span> The first two are solid and measured here — a <code>.rs</code> edit under <code>app/</code> swapped the wasm in <strong>398 ms</strong> with no page reload, and a stylesheet edit costs zero redraws. The backend tier is the dev server's self-restart, and it restarts by re-executing <code>current_exe()</code> — which on Linux resolves through <code>/proc/self/exe</code> and comes back as <code>…/brain (deleted)</code> once the build has replaced that file underneath the running process. It reports <code>restart failed … — staying up</code> and keeps serving the old code: the right failure mode, but not a reload. Restart <code>./dev.sh</code> after a backend change. <code>rustex1</code> is vendored as a submodule shared with another project, so the fix belongs upstream rather than here.</p></div>
     </section>
 
     <hr class="div">
