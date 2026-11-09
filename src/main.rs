@@ -16,6 +16,7 @@ mod llm;
 mod mcp;
 mod pg;
 mod query;
+mod serve;
 mod server;
 mod slug;
 mod store;

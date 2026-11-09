@@ -6,6 +6,13 @@
 //! | [`Chat`] | `POST {chat_url}/v1/chat/completions` | phrasing an answer (`think`, the crawl's finalizer) and the agentic `ontology` traversal |
 //! | [`Embedder`] | `POST {url}` (OpenAI `embeddings` shape) | one vector per entity, batched |
 //!
+//! A `slot_url` that already names a path (`…/v1/decisions`) is used verbatim,
+//! so a provider that spells the slot endpoint differently needs no fork.
+//!
+//! All three send `Authorization: Bearer <token>` when the brain has a token —
+//! see [`crate::config::api_key`] for where one comes from, and nothing at all
+//! when it has none, which is every local model server.
+//!
 //! The division of labour is the whole architecture: **facts live in the
 //! engine, judgements live in the model.** The slot never sees a free-text
 //! field it can invent an entity into — every question it answers is a choice
@@ -19,13 +26,37 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::config::LlmConfig;
+use crate::config::{self, LlmConfig};
 
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
         .build()
         .context("building the http client")
+}
+
+/// Attach the provider's bearer token, if this brain has one. Local servers
+/// (llama.cpp, ollama, systemone) do not check it, so `None` is the normal
+/// case and sends no header rather than an empty one.
+fn auth(
+    req: reqwest::RequestBuilder,
+    key: &Option<String>,
+) -> reqwest::RequestBuilder {
+    match key {
+        Some(k) => req.bearer_auth(k),
+        None => req,
+    }
+}
+
+/// `{base}/v1/{path}`, unless `base` already carries a versioned path — then
+/// it is the full endpoint and gets used as written.
+fn endpoint(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.contains("/v1/") {
+        base.to_string()
+    } else {
+        format!("{base}/{path}")
+    }
 }
 
 // ── the decision slot ────────────────────────────────────────────────────────
@@ -96,6 +127,7 @@ struct SlotResponse {
 #[derive(Clone)]
 pub struct Slot {
     url: String,
+    key: Option<String>,
     http: reqwest::Client,
     pub calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -104,7 +136,8 @@ pub struct Slot {
 impl Slot {
     pub fn new(cfg: &LlmConfig) -> Result<Slot> {
         Ok(Slot {
-            url: format!("{}/v1/systemone", cfg.slot_url.trim_end_matches('/')),
+            url: endpoint(&cfg.slot_url, "v1/systemone"),
+            key: config::api_key("slot", cfg.api_key.as_deref()),
             http: client()?,
             calls: Default::default(),
             tokens: Default::default(),
@@ -128,9 +161,7 @@ impl Slot {
             / 4;
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.tokens.fetch_add(approx as u64, Ordering::Relaxed);
-        let res = self
-            .http
-            .post(&self.url)
+        let res = auth(self.http.post(&self.url), &self.key)
             .json(&body)
             .send()
             .await
@@ -175,14 +206,16 @@ impl ChatMessage {
 pub struct Chat {
     url: String,
     model: String,
+    key: Option<String>,
     http: reqwest::Client,
 }
 
 impl Chat {
     pub fn new(cfg: &LlmConfig) -> Result<Chat> {
         Ok(Chat {
-            url: format!("{}/v1/chat/completions", cfg.chat_url.trim_end_matches('/')),
+            url: endpoint(&cfg.chat_url, "v1/chat/completions"),
             model: cfg.chat_model.clone(),
+            key: config::api_key("chat", cfg.api_key.as_deref()),
             http: client()?,
         })
     }
@@ -194,9 +227,7 @@ impl Chat {
             "temperature": temperature,
             "stream": false,
         });
-        let res = self
-            .http
-            .post(&self.url)
+        let res = auth(self.http.post(&self.url), &self.key)
             .json(&body)
             .send()
             .await
@@ -277,6 +308,7 @@ pub fn extract_json(s: &str) -> Option<Value> {
 pub struct Embedder {
     url: String,
     model: String,
+    key: Option<String>,
     http: reqwest::Client,
     pub dims: usize,
 }
@@ -294,6 +326,7 @@ impl Embedder {
         Some(Embedder {
             url: cfg.url.clone(),
             model,
+            key: config::api_key("embed", cfg.api_key.as_deref()),
             http: client().ok()?,
             dims: cfg.dims,
         })
@@ -307,9 +340,7 @@ impl Embedder {
             return Ok(vec![]);
         }
         let body = json!({ "model": self.model, "input": texts });
-        let res = self
-            .http
-            .post(&self.url)
+        let res = auth(self.http.post(&self.url), &self.key)
             .json(&body)
             .send()
             .await

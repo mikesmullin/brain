@@ -192,30 +192,49 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         Ok(())
     }
 
+    /// The pgvector column type the embeddings table uses for this width.
+    ///
+    /// HNSW refuses a `vector` of more than 2000 dimensions, and 2560 is what
+    /// the common large embedding models emit — so past that line the column
+    /// becomes `halfvec`, which is indexable to 4000 and costs nothing here:
+    /// cosine ranking on 16-bit components is indistinguishable from f32 at
+    /// these widths. The type follows the model's dimensionality, so there is
+    /// no knob to get out of step with the data.
+    fn vec_type(&self) -> &'static str {
+        if self.dims > 2000 {
+            "halfvec"
+        } else {
+            "vector"
+        }
+    }
+
     async fn ensure_embeds(&self, dims: usize) -> Result<()> {
         let c = self.client().await?;
         let s = self.s();
-        let have: Option<i32> = c
+        let want = if dims > 2000 { "halfvec" } else { "vector" };
+        let have: Option<(i32, String)> = c
             .query_opt(
-                "SELECT a.atttypmod FROM pg_attribute a
+                "SELECT a.atttypmod, tp.typname FROM pg_attribute a
                    JOIN pg_class t ON t.oid = a.attrelid
                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                   JOIN pg_type tp ON tp.oid = a.atttypid
                   WHERE n.nspname = $1 AND t.relname = 'embeds' AND a.attname = 'vec'",
                 &[&self.schema],
             )
             .await?
-            .map(|r| r.get(0));
-        if let Some(mod_) = have {
-            if mod_ as usize == dims {
+            .map(|r| (r.get(0), r.get(1)));
+        if let Some((mod_, ty)) = have {
+            if mod_ as usize == dims && ty == want {
                 return Ok(());
             }
-            // the configured embedding model changed shape; the vectors are stale
+            // the configured embedding model changed shape, or width crossed the
+            // 2000-dimension line into halfvec; either way the vectors are stale
             c.batch_execute(&format!("DROP TABLE IF EXISTS {s}.embeds")).await?;
         }
         c.batch_execute(&format!(
             "CREATE UNLOGGED TABLE IF NOT EXISTS {s}.embeds (
                slug text PRIMARY KEY,
-               vec  vector({dims}) NOT NULL
+               vec  {want}({dims}) NOT NULL
              )"
         ))
         .await?;
@@ -255,7 +274,8 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         }
         c.batch_execute(&format!(
             "CREATE INDEX IF NOT EXISTS embeds_hnsw_idx ON {s}.embeds
-               USING hnsw (vec vector_cosine_ops) WITH (m = 16, ef_construction = 64)"
+               USING hnsw (vec {}_cosine_ops) WITH (m = 16, ef_construction = 64)",
+            self.vec_type()
         ))
         .await
         .context("building the HNSW index")?;
@@ -874,11 +894,15 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         let c = self.client().await?;
         let s = self.s();
         let lit = vector_literal(vec);
+        let cast = self.vec_type();
+        // The literal goes in as `text` and is cast here, not as `$1::{cast}`:
+        // tokio-postgres has no codec for pgvector's types and refuses to
+        // serialise a String into one it read out of the catalog.
         let rows = c
             .query(
                 &format!(
-                    "SELECT slug, (1 - (vec <=> $1::vector))::float8 AS sim
-                       FROM {s}.embeds ORDER BY vec <=> $1::vector LIMIT $2"
+                    "SELECT slug, (1 - (vec <=> $1::text::{cast}))::float8 AS sim
+                       FROM {s}.embeds ORDER BY vec <=> $1::text::{cast} LIMIT $2"
                 ),
                 &[&lit, &limit],
             )

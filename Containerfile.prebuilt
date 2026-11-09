@@ -1,0 +1,53 @@
+# brain-wiki — assemble-only image for publication (amd64, and any prebuilt target).
+#
+# Compiles NOTHING by design: rustc under qemu in the podman VM dies with `uncaught target signal 11`, so tools/build-image.sh cross-compiles natively and this recipe only assembles.
+#   tools/build-image.sh            # cross-build + assemble + verify, tag latest+<sha>
+#   tools/build-image.sh --push     # also push both tags
+# Keep the two recipes in step — same runtime packages, uid, HEALTHCHECK, entrypoint — or the image you tested locally is not the image you shipped.
+
+FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
+
+# Load-bearing, so nobody prunes it later: ca-certificates (TLS to the model gateway and to github.com for the corpus clone — both boot dependencies), git (the initContainer clones the corpus), curl (HEALTHCHECK only).
+# build/certs/ ships empty; a private anchor belongs to the network that trusts it and is never committed — see build/certs/README.md.
+COPY build/certs/ /usr/local/share/ca-certificates/
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git curl \
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# uid pinned rather than `useradd -r`: an auto-assigned uid shifts the day the base image adds a user, and 1000 is the conventional runAsUser so the image and the Deployment's securityContext agree.
+RUN groupadd --gid 1000 brain \
+ && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin brain \
+ && mkdir -p /opt/brain /data \
+ && chown -R 1000:1000 /opt/brain /data
+
+WORKDIR /opt/brain
+
+# Three artifacts, all produced by tools/build-image.sh, none compiled here.
+# From build/out/, not target/: .containerignore must keep excluding the multi-GB host cargo tree, so "not in build/out/" is the same statement as "not in the image".
+# The glibc pin (2.36) is why an arm64 host's binary runs on bookworm; without it the image builds happily and the pod dies at start with `GLIBC_2.39' not found.
+COPY build/out/brain ./brain
+COPY web ./web
+# The kit's browser runtime (/app.mjs, hot.mjs, kit.css, phosphor); omit it and the page boots its shell, fetches /api/* fine, and never instantiates wasm.
+COPY vendor/rustex1/kit/web ./kit
+COPY deploy/entrypoint.sh /usr/local/bin/brain-wiki-entrypoint
+
+# The guard that makes "assemble-only" safe: a wrong pin, a wrong triple or a stale target/ otherwise produce an image that builds, pushes, schedules and then CrashLoops.
+RUN /opt/brain/brain --version \
+ && /opt/brain/brain serve --help >/dev/null \
+ && test -f /opt/brain/web/index.html \
+ && test -f /opt/brain/web/pkg/brain_app.js \
+ && test -f /opt/brain/web/pkg/brain_app_bg.wasm \
+ && test -f /opt/brain/kit/app.mjs \
+ && test -f /opt/brain/kit/kit.css
+
+EXPOSE 8080
+USER brain
+
+# /health answers without the database and without the model gateway on purpose: a pod with a slow neighbour is degraded, not dead, and conflating the two turns latency into a restart storm — readiness is the separate `ready` field.
+# Requires `podman build --format docker`: podman's default OCI format silently drops HEALTHCHECK.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/brain-wiki-entrypoint"]

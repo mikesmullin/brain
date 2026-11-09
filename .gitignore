@@ -5,9 +5,21 @@
 *.trace.jsonl
 # datasets (big, regenerable)
 /bench/datasets/
-# the pinned wasm-bindgen CLI, fetched by dev.sh
-/tools/
+# the pinned wasm-bindgen CLI dev.sh fetches — NOT all of /tools/, which also holds tools/build-image.sh
+/tools/wasm-bindgen-*/
+# build/vendor holds the pinned wasm-bindgen tarballs (re-fetchable via dev.sh; the .sha256sum beside each is the committed provenance)
+/build/vendor/*.tar.gz
 # generated wasm bundle
 /web/pkg/
 # the benchmark dataset lives outside the repo; the ETL rebuilds it
 /bench/
+# TLS: neither a private key nor a trust anchor ever belongs in the repo — both Containerfiles COPY build/certs/, which ships empty
+*.pem
+*.crt
+# ...which is why this negation names the README and nothing else: the COPY needs the directory to exist in a clean clone
+/build/certs/*
+!/build/certs/README.md
+# the cross-built binary tools/build-image.sh stages for Containerfile.prebuilt: regenerable, never a source of truth
+/build/out/
+# misc
+.*-local/

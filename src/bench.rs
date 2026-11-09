@@ -552,6 +552,15 @@ async fn project_suite(a: &Args, g: &Global) -> Result<i32> {
             .or_else(|| case["expectedAnswer"].as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
+        // Per-case cap on the walk: a wandering case (wrong kind, junk
+        // searches) fails fast at the cap instead of burning the full 160 steps
+        // on both sides of a pair. Defaults to crawl::MAX_STEPS when omitted,
+        // so existing suites run unmodified.
+        let max_steps = case
+            .get("maxSteps")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(query::crawl::MAX_STEPS);
         let t0 = Instant::now();
         let r = query::crawl::run(
             &ctx.store,
@@ -564,6 +573,7 @@ async fn project_suite(a: &Args, g: &Global) -> Result<i32> {
                 start: case["start"].as_str().map(|s| s.to_string()),
                 kind: case["kind"].as_str().or_else(|| case["answerKind"].as_str()).map(|s| s.to_string()),
                 finalize: false,
+                max_steps,
                 ..Default::default()
             },
         )
@@ -577,12 +587,18 @@ async fn project_suite(a: &Args, g: &Global) -> Result<i32> {
         } else {
             fail += 1;
         }
+        let cap_note = if !ok && r.steps.len() >= max_steps {
+            format!(" [capped at {} steps]", max_steps)
+        } else {
+            String::new()
+        };
         println!(
-            "{} {name:<28} {:>5}ms {:>3} step(s)  {}",
+            "{} {name:<28} {:>5}ms {:>3} step(s)  {}{}",
             if ok { "PASS" } else { "FAIL" },
             t0.elapsed().as_millis(),
             r.steps.len(),
-            got.join(", ")
+            got.join(", "),
+            cap_note
         );
         if !ok && !expect.is_empty() {
             println!("     expected: {}", expect.join(", "));

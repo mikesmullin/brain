@@ -131,7 +131,7 @@ fn find_root(argv: &[String]) -> Option<PathBuf> {
 }
 
 #[derive(Clone, Copy)]
-enum Route {
+pub(crate) enum Route {
     Meta,
     Entity,
     Class,
@@ -140,10 +140,15 @@ enum Route {
 
 /// The devserver hands a borrowed request to a handler; `block_on` wants an
 /// owned one it can move into the future.
-struct Owned {
+///
+/// `pub(crate)` because `serve.rs` answers the same four routes over a different
+/// transport: the handlers are the shared half, the server is not.
+pub(crate) struct Owned {
     params: BTreeMap<String, String>,
 }
 
+/// The `brain web` side: keep only the parameters the handlers read, so a
+/// stray query key cannot reach a handler and be mistaken for an argument.
 fn clone_req(req: &Request) -> Owned {
     let mut params = BTreeMap::new();
     for key in ["slug", "name", "offset", "limit", "q", "mode"] {
@@ -155,15 +160,23 @@ fn clone_req(req: &Request) -> Owned {
 }
 
 impl Owned {
+    /// The `brain serve` side: a query string already parsed and decoded.
+    pub(crate) fn from_query(params: BTreeMap<String, String>) -> Owned {
+        Owned { params }
+    }
+
     fn s(&self, k: &str) -> String {
         self.params.get(k).cloned().unwrap_or_default()
     }
+
     fn n(&self, k: &str, default: i64) -> i64 {
         self.params.get(k).and_then(|v| v.parse().ok()).unwrap_or(default)
     }
 }
 
-async fn handle(ctx: &Ctx, route: Route, req: &Owned) -> Result<Value> {
+/// Owned by `web`, called by both transports: `brain web` reaches it through
+/// `clone_req`, `brain serve` through `Owned::from_query`.
+pub(crate) async fn handle(ctx: &Ctx, route: Route, req: &Owned) -> Result<Value> {
     match route {
         Route::Meta => meta(ctx).await,
         Route::Entity => entity(ctx, &req.s("slug")).await,

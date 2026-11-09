@@ -1,0 +1,52 @@
+# Build context for Containerfile.
+#
+# The build needs exactly: Cargo.toml, Cargo.lock, rust-toolchain.toml, src/,
+# app/, vendor/rustex1/ (the kit + devserver crates the build depends on),
+# web/ (index.html, styles.css — pkg/ is generated), build/ (the staged binary,
+# the vendored wasm-bindgen tarballs, and the optional trust anchors in
+# build/certs/), deploy/ (the entrypoint). Everything here is either residue or a
+# reference.
+
+# Build output — a host `cargo build` leaves a multi-GB target/ here, and
+# shipping it would both bloat the context and hand the build a stale tree.
+target/
+**/target/
+wasm32-unknown-unknown/
+
+# The dev-time wasm-bindgen CLI dev.sh fetches into tools/. The Containerfile
+# downloads its own, pinned to the version vendor/rustex1/kit/Cargo.toml names.
+tools/
+
+# Not build input for a Rust → wasm app.
+node_modules/
+
+# Working notes: plans, benchmarks, scratch. No build or runtime reads them.
+tmp/
+docs/
+
+# Local deployment state — the CD/manifest trees this repo is deployed BY, not
+together with. None of it is build input, and `COPY . .` in the build stage would
+otherwise carry an entire environment's hostnames, cluster names and secret
+references into a layer. Gitignore alone does not protect you: podman reads this
+file, not .gitignore, and the two lists are allowed to differ.
+.*-local/
+.deploy/
+k8s/
+
+# Git metadata: 20 MB of history the image has no use for, and the entrypoint
+# clones the *data* repo at run time rather than relying on this one's.
+.git/
+.gitignore
+.gitmodules
+.containerignore
+
+# Local agent/tooling config that must not reach a build artifact.
+.env
+.envrc
+.keys.yaml
+.tokens.yaml
+
+# NOTE: *.crt / *.pem are deliberately NOT excluded here, even though .gitignore
+# ignores them. build/certs/*.crt is a legitimate build input, and this file — not
+# .gitignore — is what podman reads when it decides what reaches the daemon.
+# Ignoring certificates here would make the trust-anchor feature unbuildable.

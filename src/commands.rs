@@ -115,6 +115,10 @@ pub async fn dispatch(cmd: &str, argv: &[String], g: &Global) -> Result<i32> {
         "load" => load_cmd(argv, g).await,
         "ingest" => ingest_cmd(argv, g).await,
         "enrich" => enrich_cmd(argv, g).await,
+        // The production HTTP surface: same handlers as `web`, none of the dev
+        // server's watchers, builds or self-restart. Runs inside the runtime
+        // main() already built, unlike `web`.
+        "serve" => crate::serve::run(argv, g).await,
         "server" => crate::server::run(argv, g).await,
         // `web` never reaches here: main() dispatches it before the runtime
         // starts, because the dev server owns the process and makes its own.

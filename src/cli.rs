@@ -442,6 +442,51 @@ Examples:
     brain pg status
     brain pg psql -c 'select count(*) from entities'
 "#,
+        "serve" => r#"Usage:
+    brain serve [--host H] [--port N] [--web DIR] [--assets DIR...] [--name N]
+                [--pkg-js URL] [--pkg-wasm URL] [--quiet]
+
+Description:
+    Serve the wiki to real traffic: no watcher, no rebuild, no self-restart,
+    and a clean SIGTERM drain. Same page and same four JSON routes as
+    `brain web`, which stays the development command.
+
+    The socket binds before the database opens, so /health answers from the
+    first instant and reports "ready": false until PostgreSQL is connected,
+    with /api/* returning 503 meanwhile. That ordering is what lets a readiness
+    probe wait for a sibling database instead of killing a pod that is merely
+    patient.
+
+    Unauthenticated, exactly like `brain web`: this is the whole backend, so a
+    proxy and an identity provider belong in front of it before any network can
+    reach it. Loopback remains the default bind for that reason.
+
+Flags:
+    --host      bind address (default: 127.0.0.1; a container passes 0.0.0.0)
+    --port      HTTP port (default: 8080)
+    --web       static root holding index.html and pkg/ (default: ./web)
+    --assets    extra static root, searched after --web (repeatable). This is
+                where the rustex1 kit's web/ goes, for app.mjs, hot.mjs,
+                kit.css and the icon font — without it the page loads its shell
+                and never boots any wasm.
+    --name      reported by GET /api/config (default: brain)
+    --pkg-js    wasm glue URL (default: /pkg/brain_app.js)
+    --pkg-wasm  wasm binary URL (default: /pkg/brain_app_bg.wasm)
+    --quiet     suppress the per-request access log
+
+Endpoints:
+    GET  /health       liveness; touches no database
+    GET  /api/config   the wasm artifact URLs the browser boots from
+    GET  /api/meta     ontology, classes, counts
+    GET  /api/entity   one entity, by ?slug=
+    GET  /api/class    one class, by ?name=&offset=&limit=
+    GET  /api/query    ?q=&mode=crawl|search|think|graph|graphql&limit=
+
+Examples:
+    brain serve --host 0.0.0.0 --port 8080 --db /data/dstwiki
+    brain serve --port 8099 --db ../brain-db-dstwiki \
+                --assets vendor/rustex1/kit/web          # local, from a checkout
+"#,
         "server" => r#"Usage:
     brain server <start|stop|status|vacuum|reindex|export|components>
 
@@ -706,8 +751,8 @@ pub fn peel_global(argv: Vec<String>) -> Result<(Global, Vec<String>)> {
 
 pub const COMMANDS: &[&str] = &[
     "init", "def", "schema", "new", "set", "link", "get", "ls", "rm", "validate", "reindex",
-    "export", "load", "convert", "pg", "server", "search", "ingest", "enrich", "graph", "think",
-    "ontology", "graphql", "crawl", "web", "mcp", "use", "bench", "call", "refine",
+    "export", "load", "convert", "pg", "serve", "server", "search", "ingest", "enrich", "graph",
+    "think", "ontology", "graphql", "crawl", "web", "mcp", "use", "bench", "call", "refine",
 ];
 
 /// Small helper for the hand-rolled flag parsing each command does.

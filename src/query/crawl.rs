@@ -1153,7 +1153,7 @@ pub fn frontier(c: &Crawl, w: &World, class_members: &[String]) -> Vec<String> {
             // argument, and it is a fact, not a judgement:
             //   distance 1  — the answer sits on an edge OF the object, so that
             //     edge IS the relation being asked about and its slot is
-            //     already the complete set. Extending would offer the SRE org
+            //     already the complete set. Extending would offer the engineering org
             //     behind the supporting team, which is not a team that supports
             //     the product; it scores 0.661 against a 0.7 gate, a 0.039
             //     margin, so NOT offering it is worth much more than trusting
@@ -1266,7 +1266,7 @@ pub fn orient_options(c: &Crawl, w: &World, searches: &HashMap<String, Vec<Strin
 /// since Mario really is the object the question names — and the five games
 /// hang off it by `OWNS`, an OUT-edge. The only in-edge was a team, so the menu
 /// held exactly one option at p=1.000 pointing the wrong way, and the crawl
-/// walked the org chart down to an SRE and gave up.
+/// walked the org chart down to an engineer and gave up.
 ///
 /// They are admitted ONLY when the target IS the answer kind, and that
 /// restriction is what keeps rule 1 intact. Admitting every out-edge would put
@@ -1523,7 +1523,7 @@ pub fn apply(c: &mut Crawl, w: &World, id: &str, front: &[String]) -> Applied {
 
     // A jump deliberately does NOT extend the chain: a search hit that merely
     // looks like the answer must not become collectable. That rule was measured
-    // — without it a real non-lead SRE named C-something in an unrelated org
+    // — without it a real non-lead engineer named C-something in an unrelated org
     // got committed — and it stays.
     //
     // But a jump taken while NOTHING has been collected is not an extension, it
