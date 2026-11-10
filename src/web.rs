@@ -302,6 +302,171 @@ async fn class(ctx: &Ctx, name: &str, offset: i64, limit: i64) -> Result<Value> 
     }))
 }
 
+/// How many crawls may wait for the gate before new arrivals are shed to the
+/// cheap path instead of joining the queue.
+///
+/// One walk costs up to [`query::crawl::CRAWL_DEADLINE_MS`] plus its own finalise,
+/// so a queue of N means the last one waits roughly N half-minutes for an answer
+/// it may not get. Past this depth the right answer is "here is the ontology
+/// result now", not "hold this socket and hope" -- which is also what keeps a
+/// burst of traffic from pinning connections and tasks behind a busy GPU.
+pub const CRAWL_QUEUE_CAP: usize = 8;
+
+/// Restores the queue depth however the walk ends -- returned, errored or panicked.
+///
+/// A plain decrement after the call would strand the count on the error paths, and
+/// a permanently inflated `crawl_waiting` means the server eventually refuses every
+/// crawl it is asked to run. That is the kind of fault that survives a restart-free
+/// deploy and looks like a mysterious, permanent mode switch.
+struct QueueGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for QueueGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The ranked rows, or `Null`. Best-effort by design: the rows are context for an
+/// answer, and a failure here must never be the reason a search fails.
+async fn rows(ctx: &Ctx, q: &str, limit: i64) -> Value {
+    match query::search::run(
+        &ctx.store,
+        ctx.embedder.as_ref(),
+        q,
+        &query::search::SearchOpts { limit, snippets: true, ..Default::default() },
+    )
+    .await
+    {
+        Ok(h) => serde_json::to_value(h).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
+}
+
+/// An ontology answer, with the crawl's own account of why it is not here.
+async fn ontology_payload(ctx: &Ctx, q: &str, fallback: Value, search: Value) -> Result<Value> {
+    let o = query::ontology::run(&ctx.store, &ctx.tbox, &ctx.chat, q, None).await?;
+    Ok(json!({
+        "mode": "ontology",
+        "ontology": serde_json::to_value(o)?,
+        "fallback": fallback,
+        "search": search,
+    }))
+}
+
+/// The crawl, as JSON -- shared by `/api/query` and `/api/stream` so the two
+/// cannot drift into different behaviours.
+///
+/// `progress` is the SSE sink; `None` gives the plain JSON request exactly the
+/// walk it had before. The budget and the ontology fallback live HERE rather than
+/// in the caller, because "the browser path is the one sharing a GPU" is true of
+/// both endpoints, and a second call site quietly re-inheriting an unbounded walk
+/// is precisely the bug this whole change is about.
+pub async fn crawl_payload(
+    ctx: &Ctx,
+    q: &str,
+    limit: i64,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<query::crawl::Progress>>,
+) -> Result<Value> {
+    // ---- admission: one walk at a time ---------------------------------------
+    // Shed first, then queue. Overloaded requests get the ontology answer
+    // immediately rather than holding a socket for minutes: it is the same
+    // graceful path a deadline takes, and `reason` says which one it was.
+    //
+    // The gate covers the WALK only. The ontology fallback is short and bounded
+    // (a handful of turns), and the saturated path reaches it without a permit by
+    // necessity -- a queue that could not answer while full would be a deadlock
+    // with extra steps.
+    if ctx.crawl_waiting.load(std::sync::atomic::Ordering::Relaxed) >= CRAWL_QUEUE_CAP {
+        return ontology_payload(
+            ctx,
+            q,
+            json!({
+                "from": "crawl",
+                "reason": "saturated",
+                "queueCap": CRAWL_QUEUE_CAP,
+                "budgetMs": query::crawl::deadline_ms().unwrap_or(query::crawl::CRAWL_DEADLINE_MS),
+            }),
+            rows(ctx, q, limit).await,
+        )
+        .await;
+    }
+    ctx.crawl_waiting.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _queue = QueueGuard(std::sync::Arc::clone(&ctx.crawl_waiting));
+    let Ok(permit) = std::sync::Arc::clone(&ctx.crawl_gate).acquire_owned().await else {
+        return ontology_payload(
+            ctx,
+            q,
+            json!({ "from": "crawl", "reason": "gate-closed" }),
+            rows(ctx, q, limit).await,
+        )
+        .await;
+    };
+
+    let r = query::crawl::run(
+        &ctx.store,
+        &ctx.tbox,
+        &ctx.slot,
+        Some(&ctx.chat),
+        ctx.embedder.as_ref(),
+        q,
+        &query::crawl::CrawlOpts {
+            deadline_ms: query::crawl::deadline_ms(),
+            progress,
+            ..Default::default()
+        },
+    )
+    .await
+    .context("crawl")?;
+    // The walk is done; the GPU is free for the next searcher. What remains is a
+    // BM25 pass and possibly one short ontology answer, neither of which should
+    // keep a queue behind us.
+    drop(permit);
+
+    let search = rows(ctx, q, limit).await;
+
+    // Out of budget -> answer the same question the other way round, and
+    // SAY that is what happened.
+    //
+    // `ontology` reads the T-box and reasons over the same corpus without
+    // sweeping the graph one candidate at a time, so it is the useful answer for
+    // exactly the questions the walk wanders on. It is gated on
+    // `ended == "deadline"` alone and NOT on `no_answer` or `cancelled`: falling
+    // back on a walk that finished and genuinely found nothing would dress up a
+    // real miss as a success, and a cancelled walk has nobody left to answer.
+    // The crawl's own partial result is kept in `fallback` so the UI can say "the
+    // walk ran out of budget after N steps" rather than silently switching modes
+    // behind the user -- and so the log line and the response agree.
+    if r.ended == "deadline" {
+        return ontology_payload(
+            ctx,
+            q,
+            json!({
+                "from": "crawl",
+                "reason": "deadline",
+                "budgetMs": query::crawl::deadline_ms().unwrap_or(query::crawl::CRAWL_DEADLINE_MS),
+                "steps": r.steps.len(),
+                "calls": r.calls,
+                "ms": r.ms,
+                "collected": r.collected.len(),
+            }),
+            search,
+        )
+        .await;
+    }
+
+    Ok(json!({
+        "mode": "crawl",
+        "crawl": {
+            "answer": r.answer,
+            "slugs": r.collected, "labels": r.labels,
+            "kind": r.kind, "crawl_mode": r.mode,
+            "steps": r.steps.len(), "calls": r.calls, "ms": r.ms,
+            "path": r.path, "ended": r.ended,
+        },
+        "search": search,
+    }))
+}
+
 /// One endpoint, six modes.
 async fn query_mode(ctx: &Ctx, q: &str, mode: &str, limit: i64) -> Result<Value> {
     if q.trim().is_empty() {
@@ -328,39 +493,6 @@ async fn query_mode(ctx: &Ctx, q: &str, mode: &str, limit: i64) -> Result<Value>
             query::think::run(&ctx.store, ctx.embedder.as_ref(), &ctx.chat, q, 8).await.context("think")?)?}),
         "ontology" => json!({"mode": "ontology", "ontology": serde_json::to_value(
             query::ontology::run(&ctx.store, &ctx.tbox, &ctx.chat, q, None).await.context("ontology")?)?}),
-        _ => {
-            let r = query::crawl::run(
-                &ctx.store,
-                &ctx.tbox,
-                &ctx.slot,
-                Some(&ctx.chat),
-                ctx.embedder.as_ref(),
-                q,
-                &query::crawl::CrawlOpts::default(),
-            )
-            .await
-            .context("crawl")?;
-            // The SERP shows the crawl's answer AND the ranked rows behind it:
-            // an answer you cannot check is worse than one you can.
-            let hits = query::search::run(
-                &ctx.store,
-                ctx.embedder.as_ref(),
-                q,
-                &query::search::SearchOpts { limit, snippets: true, ..Default::default() },
-            )
-            .await
-            .ok();
-            json!({
-                "mode": "crawl",
-                "crawl": {
-                    "answer": r.answer,
-                    "slugs": r.collected, "labels": r.labels,
-                    "kind": r.kind, "crawl_mode": r.mode,
-                    "steps": r.steps.len(), "calls": r.calls, "ms": r.ms,
-                    "path": r.path,
-                },
-                "search": hits.map(|h| serde_json::to_value(h).unwrap_or(Value::Null)),
-            })
-        }
+        _ => crawl_payload(ctx, q, limit, None).await?,
     })
 }

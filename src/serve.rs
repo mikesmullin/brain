@@ -107,6 +107,13 @@ const STORE_OPEN_TIMEOUT: Duration = Duration::from_secs(180);
 /// so in-flight requests finish before the cluster tears the listener down.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Ceiling on one `/api/stream` response. The walk inside it is already bounded
+/// by [`crawl::CRAWL_DEADLINE_MS`], but the payload also runs a search and may run
+/// an ontology fallback after that budget is spent, and this task holds a socket
+/// plus an `in_flight` slot while it does -- so the stream gets its own backstop
+/// rather than inheriting whatever the slowest leg happens to take.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(45);
+
 pub struct Args {
     pub host: IpAddr,
     pub port: u16,
@@ -349,6 +356,33 @@ async fn serve_connection(srv: Arc<Server>, mut stream: TcpStream) {
         };
         // Keep whatever the client pipelined after the headers.
         buf.drain(..head_end + 4);
+
+        // ---- server-sent events: its own path, by necessity ------------------
+        //
+        // Everything below assumes a response is one buffer built and written
+        // once. A progress stream is the opposite shape -- headers now, body in
+        // pieces, for as long as the walk runs -- so it cannot go through
+        // `route`/`framed`. Catch it here, hand it the socket, and end the
+        // connection when it finishes: SSE clients reconnect on their own
+        // (`EventSource` does it for you), so a closed stream is a normal
+        // outcome rather than an error.
+        let (rpath, rquery) = target.split_once('?').unwrap_or((target.as_str(), ""));
+        if method == "GET" && rpath == "/api/stream" {
+            let started = Instant::now();
+            let res = serve_stream(&srv, &mut stream, rquery).await;
+            if srv.args.log {
+                srv.requests.fetch_add(1, Ordering::Relaxed);
+                log::line(
+                    "http",
+                    &format!(
+                        "GET /api/stream {} {}ms",
+                        if res.is_ok() { "200" } else { "err" },
+                        started.elapsed().as_millis()
+                    ),
+                );
+            }
+            return;
+        }
 
         let keep_alive = keep_alive(&method, &version, &head);
         let started = Instant::now();
@@ -803,6 +837,99 @@ fn parse_head(head: &str) -> Option<(String, String, String)> {
         return None; // not origin-form; a proxy mistake, not our problem
     }
     Some((method, target, version))
+}
+
+/// `GET /api/stream?q=…` -- one crawl as `text/event-stream`.
+///
+/// Why SSE and not a websocket, stated here because the next reader will ask:
+/// the traffic is one-way, the payload is a few small JSON lines, and
+/// `EventSource` already handles reconnection. A websocket would buy nothing
+/// except a second protocol to proxy, authenticate and -- given what the kit's
+/// dev client taught us -- reconnect without inventing a 4-second retry loop
+/// that never stops. If the follow-up chat feature ever needs the server to
+/// react mid-generation, that is the moment to upgrade; it is a transport swap
+/// behind this function, not a rewrite.
+///
+/// Events: `event: step` per walk step (tiny -- step, stage, action, arg, calls,
+/// ms), then exactly one `event: result` carrying the same JSON `/api/query`
+/// would have returned, or `event: error`. Keeping the result identical to the
+/// JSON endpoint means the browser can treat a dropped stream as "fall back to
+/// the polling request" without special-casing anything.
+///
+/// Cancellation is a property of this design rather than an extra: writes go
+/// straight to the socket, so a client that vanished makes `write_all` fail, the
+/// sink's receiver drops, and `crawl::run` sees its send fail and stops -- the
+/// abandoned search stops costing the shared GPU anything.
+async fn serve_stream(srv: &Arc<Server>, stream: &mut TcpStream, query: &str) -> std::io::Result<()> {
+    let params = query_params(query);
+    let q = params.get("q").cloned().unwrap_or_default();
+    if q.trim().is_empty() {
+        return write_all(
+            stream,
+            b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\n\
+              Content-Length: 24\r\nConnection: close\r\n\r\n{\"error\":\"no query\"}\n",
+        )
+        .await;
+    }
+    let Some(ctx) = srv.ctx.read().await.clone() else {
+        return write_all(
+            stream,
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\n\
+              Content-Length: 27\r\nConnection: close\r\n\r\n{\"error\":\"not ready\"}\n",
+        )
+        .await;
+    };
+
+    // Headers immediately, before any work: a client that is watching progress
+    // needs the stream open, not merely unbuffered. `X-Accel-Buffering: no` is
+    // the conventional hint that no proxy on the path may hold the body.
+    write_all(
+        stream,
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+          Cache-Control: no-store\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n",
+    )
+    .await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::query::crawl::Progress>();
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(20);
+    let mut job = tokio::spawn(async move { crate::web::crawl_payload(&ctx, &q, limit, Some(tx)).await });
+
+    // Once the crawl returns, its sink drops and `rx.recv()` starts yielding
+    // None forever -- which would spin this loop, and worse, would make it
+    // believe the stream was over while the search/ontology half of the payload
+    // is still running. So the receive arm retires itself on the first None and
+    // the job arm stays the only way out.
+    let mut listening = true;
+    loop {
+        tokio::select! {
+            ev = rx.recv(), if listening => match ev {
+                Some(p) => {
+                    let Ok(body) = serde_json::to_string(&p) else { continue };
+                    write_all(stream, format!("event: step\ndata: {body}\n\n").as_bytes()).await?;
+                }
+                None => listening = false,
+            },
+            // Bounded, because this task holds a connection and an in_flight
+            // slot: the walk has its own 6 s budget, but a hung search or
+            // ontology leg behind it should not pin a socket indefinitely.
+            r = tokio::time::timeout(STREAM_TIMEOUT, &mut job) => {
+                let (kind, body) = match r {
+                    Err(_) => ("error", r#"{"error":"stream timeout"}"#.to_string()),
+                    Ok(Err(_)) => ("error", r#"{"error":"crawl panicked"}"#.to_string()),
+                    Ok(Ok(Err(e))) => ("error", json!({"error": e.to_string()}).to_string()),
+                    Ok(Ok(Ok(v))) => serde_json::to_string(&v)
+                        .map(|s| ("result", s))
+                        .unwrap_or_else(|_| ("error", r#"{"error":"serialise failed"}"#.to_string())),
+                };
+                write_all(stream, format!("event: {kind}\ndata: {body}\n\n").as_bytes()).await?;
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn keep_alive(method: &str, version: &str, head: &str) -> bool {

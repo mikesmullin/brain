@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::abox::pretty_slug;
 use crate::llm::{Answer, Chat, ChatMessage, Question, Slot};
+use tokio::sync::mpsc::UnboundedSender;
 use crate::store::{EntityRow, Store};
 use crate::tbox::TBox;
 
@@ -113,6 +114,58 @@ const ADJ_CAP: i64 = 256;
 /// sized for MAX_CLASS_ENUM candidates at two turns each, plus orientation and
 /// the chain walk.
 pub const MAX_STEPS: usize = 160;
+
+/// Wall-clock budget for a crawl served to a browser, in milliseconds.
+///
+/// `MAX_STEPS` bounds how long a walk may WANDER, but it does not bound how long
+/// it may TAKE, and those are different limits when the thing being metered is a
+/// GPU. A walk that runs to the cap makes ~161 sequential slot calls; measured on
+/// `brain-wiki.sre.blz.dev`, those cost 89 s, 131 s and 227 s. The server log was
+/// bimodal -- 7 s when the walk converged, minutes when it did not -- for what was
+/// often the same question, because the commit gate has almost no margin (see
+/// [`GOAL_T`]) and a 4B decision model can be flipped by punctuation.
+///
+/// The collateral is what makes this an operational problem rather than an
+/// annoyance: the `850k` guest runs BOTH engines on ONE card -- vLLM for chat on
+/// :1234 and `llama.cpp:server-cuda` for the decision slot on :1237 at
+/// `parallel: 1` -- so a wandering crawl holds that GPU for four minutes and every
+/// other consumer of the instance queues behind it, including unrelated agents.
+///
+/// 6 s is deliberately aggressive. A converged crawl is 4-6 calls and finishes in
+/// ~7 s through the gateway, so the budget is set just above the good path and far
+/// below the bad one: the walk that would have taken 227 s is cut off at roughly
+/// four calls' worth of work instead. `serve`'s HTTP path applies it and falls back
+/// to `ontology` mode when it fires.
+///
+/// Two places deliberately do NOT apply it by default:
+///
+/// * `brain crawl` on the CLI, where the whole point is to watch the wandering walk
+///   happen -- pass `--deadline <ms>` to opt in, `--deadline 0` to disable.
+/// * `brain bench suite`, which builds `CrawlOpts` with `deadline_ms: None`, so a
+///   slow gateway cannot make a case time out and then be judged on a fallback.
+pub const CRAWL_DEADLINE_MS: u64 = 6_000;
+
+/// The effective walk budget, in ms.
+///
+/// Read once from `BRAIN_CRAWL_DEADLINE_MS`, so the number can be tuned against
+/// real traffic without a rebuild -- which matters because the right value is not
+/// knowable from a desk. It depends on how far the GPU is (transatlantic RTT), how
+/// many searchers are sharing one decision slot at `parallel: 1`, and how chatty
+/// the corpus's records are. Setting it too low quietly routes everyone to the
+/// ontology; too high and a wandering walk hogs the card. `0` disables the budget.
+///
+/// Cached in a `OnceLock` rather than read per call: `std::env::var` allocates, and
+/// this sits on the path of every step's decision.
+pub fn deadline_ms() -> Option<u64> {
+    static ONCE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| {
+        std::env::var("BRAIN_CRAWL_DEADLINE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .or_else(|| Some(CRAWL_DEADLINE_MS))
+    })
+}
 const FINALIZER_CONTENT_BUDGET: usize = 6000;
 
 // ─── words about English, not about any schema ──────────────────────────────
@@ -2628,6 +2681,25 @@ pub struct CrawlResult {
     pub ms: u128,
 }
 
+/// One line of live progress for a running crawl.
+///
+/// Deliberately tiny, and deliberately a *copy* of the fields rather than a
+/// borrow of [`Step`]: it crosses an async boundary to a socket writer that may
+/// vanish at any moment, and it is rendered as a counter in a browser, not as
+/// the trace. The full [`Step`] history still comes back in the final result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Progress {
+    pub step: usize,
+    pub stage: &'static str,
+    pub action: String,
+    pub arg: Option<String>,
+    /// Slot calls made SO FAR IN THIS CRAWL, not the client's lifetime total --
+    /// same per-crawl discipline as [`CrawlResult::calls`], so a number in the UI
+    /// cannot disagree with the number in the result.
+    pub calls: u64,
+    pub ms: u128,
+}
+
 pub struct CrawlOpts {
     pub start: Option<String>,
     pub kind: Option<String>,
@@ -2635,6 +2707,13 @@ pub struct CrawlOpts {
     pub trace: bool,
     pub verbose: bool,
     pub max_steps: usize,
+    /// Stop the walk once this much wall clock has passed. `None` = unbounded
+    /// (the CLI default); see [`CRAWL_DEADLINE_MS`] for why the HTTP path sets it.
+    pub deadline_ms: Option<u64>,
+    /// Live progress, for `text/event-stream`. `None` = no listener (CLI, bench,
+    /// plain JSON requests). Sending is non-blocking; a failed send means the
+    /// reader went away and the walk stops.
+    pub progress: Option<UnboundedSender<Progress>>,
 }
 
 impl Default for CrawlOpts {
@@ -2646,6 +2725,8 @@ impl Default for CrawlOpts {
             trace: false,
             verbose: false,
             max_steps: MAX_STEPS,
+            deadline_ms: None,
+            progress: None,
         }
     }
 }
@@ -3031,6 +3112,8 @@ pub async fn run(
     // case the single replica does not produce, but that is the real fix if this
     // ever serves more than one in-flight crawl.
     let (calls0, tokens0) = slot.counters();
+    let mut deadline_hit = false;
+    let mut cancelled = false;
     let mut log = |m: &str| {
         if opts.verbose {
             eprintln!("{m}");
@@ -3071,6 +3154,21 @@ pub async fn run(
     for i in 0..opts.max_steps {
         if c.done {
             break;
+        }
+        // Checked between turns, not across a POST: a decision is one round trip,
+        // so the worst overshoot is a single call (~1.4 s through the gateway).
+        // Aborting mid-request would need the slot client to be cancellable, and
+        // buying ~0.7 s of precision with a half-finished HTTP exchange is not a
+        // trade worth making -- the point is to stop the NEXT call, not this one.
+        if let Some(d) = opts.deadline_ms {
+            if t0.elapsed().as_millis() as u64 >= d {
+                deadline_hit = true;
+                log(&format!(
+                    "  >> deadline {d}ms reached after {i} step(s), {} call(s) -- stopping the walk",
+                    slot.counters().0.saturating_sub(calls0)
+                ));
+                break;
+            }
         }
         let turn = build_turn(&mut c, &mut w).await?;
         let (action, stage, why, slot_ms, walk) = decide(&mut c, &w, &turn, slot, opts.verbose).await?;
@@ -3119,6 +3217,28 @@ pub async fn run(
             refused: res.refused.clone(),
             slot_ms,
         });
+        // Push progress to the socket BEFORE anything else: the whole value of a
+        // progress event is that it lands while the walk is still running, and
+        // every line below this can wait on the slot.
+        if let Some(tx) = &opts.progress {
+            let sent = tx.send(Progress {
+                step: i + 1,
+                stage: stage.as_str(),
+                action: action.clone(),
+                arg: res.arg.clone(),
+                calls: slot.counters().0.saturating_sub(calls0),
+                ms: t0.elapsed().as_millis(),
+            });
+            // A failed send means nobody is reading: the browser refreshed or
+            // navigated away mid-crawl. Take the hint and stop -- this is the
+            // only cancellation available to a walk that is one long await,
+            // and the work it skips is charged to a GPU everyone shares.
+            if sent.is_err() {
+                cancelled = true;
+                c.stall = Some("client disconnected; walk stopped".into());
+                break;
+            }
+        }
         // A `search:` action only widens what the next turn may offer, so make
         // its hits concrete the way the engine's own `seen` set expects.
         if let Some(term) = action.strip_prefix("search:") {
@@ -3148,7 +3268,11 @@ pub async fn run(
     let calls = calls_total.saturating_sub(calls0);
     let tokens = tokens_total.saturating_sub(tokens0);
     let mut answer = None;
-    if opts.finalize {
+    // The finalizer is a vLLM generation -- the single most expensive thing this
+    // walk can do, and the one that competes hardest with everyone else on the
+    // card. A walk that already spent its whole budget is exactly the case we are
+    // trying to relieve, so it does not get to start a long generation now.
+    if opts.finalize && !deadline_hit && !cancelled {
         if let Some(chat) = chat {
             match finalize(&c, &w, chat, &steps, opts.trace).await {
                 Ok(t) if !t.trim().is_empty() => answer = Some(t),
@@ -3171,7 +3295,15 @@ pub async fn run(
             "set"
         },
         path: c.visited.clone(),
-        ended: if c.done { "stopped" } else { "no_answer" },
+        ended: if cancelled {
+            "cancelled"
+        } else if deadline_hit {
+            "deadline"
+        } else if c.done {
+            "stopped"
+        } else {
+            "no_answer"
+        },
         stall: c.stall.clone(),
         steps,
         calls,

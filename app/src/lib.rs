@@ -39,6 +39,9 @@ impl App for Brain {
         // The schema and the counts are fetched once and kept: they change only
         // when someone reindexes, and every page's sidebar reads them.
         store::load_meta();
+        // One clock loop for the life of the instance. It is inert whenever no
+        // search is in flight, so paying for it on the home page costs nothing.
+        store::start_clock();
     }
 }
 

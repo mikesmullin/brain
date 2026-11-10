@@ -330,6 +330,33 @@ fn search(params: JsValue) -> JsValue {
         parts.push(format!("{}ms", js::get_num(&c, "ms") as u64));
         JsValue::from_str(&parts.join(" · "))
     })
+    .method("fallbackNote", |_this, args| {
+        // Say WHY the mode switched. The reasons are different facts and deserve
+        // different sentences: "ran out of time" tells the user to rephrase or
+        // retry, "everyone is queued" tells them to wait a moment -- and getting
+        // those backwards is how a diagnostic becomes noise.
+        let f = js::arg(&args, 0);
+        let reason = js::get_str(&f, "reason");
+        let text = match reason.as_str() {
+            "saturated" => format!(
+                "too many crawls are already queued ({}) — answering from the ontology instead",
+                js::get_num(&f, "queueCap") as u64
+            ),
+            "gate-closed" => {
+                "the search queue is shutting down — answering from the ontology instead".to_string()
+            }
+            _ => format!(
+                "crawl stopped at its {:.1}s budget after {} step(s) / {} decision(s) — answering from the ontology instead",
+                // One decimal, not an integer: a sub-second budget would otherwise
+                // print "0s", which reads like a misconfiguration rather than a
+                // deliberate (if aggressive) number.
+                (js::get_num(&f, "budgetMs") / 1000.0).max(0.0),
+                js::get_num(&f, "steps") as u64,
+                js::get_num(&f, "calls") as u64,
+            ),
+        };
+        JsValue::from_str(&text)
+    })
     .method("pathHtml", |_this, args| {
         let p = js::arg(&args, 0);
         let nodes = js::get(&p, "nodes");
@@ -357,6 +384,29 @@ fn search(params: JsValue) -> JsValue {
             .iff("$store.serp.loading")
             .text("$store.serp.mode === 'crawl' ? 'walking the graph…' : 'searching…'"),
         m("div").class("err").iff("$store.serp.error").text("$store.serp.error"),
+        // ---- live progress ---------------------------------------------------
+        //
+        // Only crawl earns a progress feed: it is the one mode that can run for
+        // minutes, and a spinner that says "walking the graph…" for 100 s is
+        // indistinguishable from a hang. The step row below is m-js's business --
+        // a new step lands about once a second, which is structure -- while the
+        // clock node is written directly by `store::start_clock()`, because 30 Hz
+        // is characters, not a subtree.
+        m("div")
+            .class("live")
+            .iff("$store.serp.loading && $store.serp.mode === 'crawl'")
+            .kids(vec![
+                m("span").class("live-stage").text("$store.serp.liveStage || 'orienting…'"),
+                m("span").class("live-count").text("($store.serp.steps.length || 0) + ' step(s)'"),
+                m("span").class("live-decisions").text("$store.serp.liveCalls + ' decision(s)'"),
+                m("span").class("live-clock").attr("id", "brain-elapsed").text("'0.000s'"),
+            ]),
+        // A mode switch the user did not ask for has to be said out loud: an
+        // ontology answer parked under a crawl heading reads as a broken heading.
+        m("div")
+            .class("fallback-note")
+            .iff("$store.serp.fallback")
+            .text("fallbackNote($store.serp.fallback)"),
         // crawl
         m("div").class("answer").iff("$store.serp.crawl").kids(vec![
             m("div").class("label").child(lit("Answer")),

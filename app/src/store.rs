@@ -10,8 +10,40 @@
 //! `x-for` / `x-text`. A `serde` round trip on the wasm side would buy nothing
 //! and cost the whole schema in generated code.
 
-use rustex1_kit::{api, js, mjs, mjs::Def};
+use rustex1_kit::{api, js, lifecycle, mjs, mjs::Def};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use wasm_bindgen::prelude::*;
+
+/// Every answer carries the id of the request that asked for it.
+///
+/// Without it the store is last-writer-wins, and the browser's arrival order is
+/// not the user's intent order: search A, get impatient, refresh, search B, and
+/// A's slow response lands on top of B's screen. The guard in [stale] makes the
+/// screen's expectation the only thing a callback is allowed to satisfy.
+static NEXT_REQ: AtomicU32 = AtomicU32::new(1);
+
+/// The live stream, if one is open, plus the closures wired to it.
+///
+/// The closures are held rather than `forget()`ten because a session can run
+/// hundreds of searches: leaking three listeners each is a slow but genuine leak,
+/// and the only thing keeping them alive is this cell. Replacing the cell drops
+/// the old set, which is exactly when the old `EventSource` is closed too.
+struct Live {
+    source: JsValue,
+    _step: Closure<dyn FnMut(JsValue)>,
+    _result: Closure<dyn FnMut(JsValue)>,
+    _error: Closure<dyn FnMut(JsValue)>,
+}
+
+thread_local! {
+    static STREAM: RefCell<Option<Live>> = const { RefCell::new(None) };
+}
+
+/// Has the screen moved on since `id` was issued?
+fn stale(id: u32) -> bool {
+    js::get_num(&mjs::store_ref("serp"), "reqId") != f64::from(id)
+}
 
 /// The modes the search bar offers, in the order it offers them. `crawl` is
 /// first because it is the default for any UI search.
@@ -165,6 +197,21 @@ fn serp() {
         .val("graph", &JsValue::NULL)
         .val("graphql", &JsValue::NULL)
         .val("hits", &js::new_array().into())
+        // Live-request bookkeeping. `reqId` is the guard above; `startedAt` seeds
+        // the stopwatch; `steps` is the crawl's progress feed, appended to one
+        // entry per SSE event; `fallback` explains a mode switch the user did not
+        // ask for -- without it an ontology answer under a "crawl" heading reads
+        // like a bug in the heading.
+        .num("reqId", 0.0)
+        .num("startedAt", 0.0)
+        .val("steps", &js::new_array().into())
+        // Two scalars the step handler maintains alongside `steps`, so the
+        // template reads a property instead of reaching for the last array
+        // element -- markup that has to index a live list is markup that
+        // mis-renders the moment the list is empty.
+        .num("liveCalls", 0.0)
+        .str("liveStage", "")
+        .val("fallback", &JsValue::NULL)
         // The bar is one input and one selector, and both write straight back
         // here so the typed query survives a swap.
         .method("setQ", |_this, args| {
@@ -215,36 +262,191 @@ fn serp() {
 /// same page.
 pub fn run_query(q: &str, mode: &str) {
     let s = mjs::store_ref("serp");
+    let id = NEXT_REQ.fetch_add(1, Ordering::Relaxed);
+
+    // Abandon whatever the previous search was still doing. Closing the stream is
+    // not tidiness: the server's next write to us fails, its progress sink fails,
+    // and the walk stops -- so an abandoned search stops costing the shared GPU.
+    STREAM.with(|c| {
+        if let Some(live) = c.borrow_mut().take() {
+            js::call(&live.source, "close", &[]);
+        }
+    });
+
     js::set_str(&s, "q", q);
     js::set_str(&s, "mode", mode);
     js::set_bool(&s, "loading", true);
     js::set_str(&s, "error", "");
-    for k in ["crawl", "think", "ontology", "graph", "graphql"] {
+    js::set_num(&s, "reqId", f64::from(id));
+    js::set_num(&s, "startedAt", js_sys::Date::now());
+    for k in ["crawl", "think", "ontology", "graph", "graphql", "fallback"] {
         js::set(&s, k, &JsValue::NULL);
     }
     js::set(&s, "hits", &js::new_array().into());
+    js::set(&s, "steps", &js::new_array().into());
+    js::set_num(&s, "liveCalls", 0.0);
+    js::set_str(&s, "liveStage", "");
     document_title(&format!("{q} — brain"));
-    let path = format!("/api/query?q={}&mode={}", encode(q), encode(mode));
-    api::get(&path, None, move |v| {
-        let s = mjs::store_ref("serp");
-        js::set_bool(&s, "loading", false);
-        let err = js::get_str(&v, "error");
-        if !err.is_empty() {
-            js::set_str(&s, "error", &err);
+
+    // The rows first, always. BM25 + RRF contacts no model and comes back in
+    // about a tenth of a second, so nothing justifies a blank page while a crawl
+    // thinks -- and a user who can see the candidates can judge the answer the
+    // moment it lands.
+    {
+        let path = format!("/api/query?q={}&mode=search", encode(q));
+        api::get(&path, None, move |v| {
+            if stale(id) {
+                return;
+            }
+            let s = mjs::store_ref("serp");
+            let search = js::get(&v, "search");
+            if !js::is_missing(&search) && !search.is_null() {
+                js::set(&s, "hits", &js::get(&search, "hits"));
+            }
             mjs::redraw();
+        });
+    }
+
+    if mode == "crawl" {
+        stream_crawl(q, id);
+    } else {
+        let path = format!("/api/query?q={}&mode={}", encode(q), encode(mode));
+        api::get(&path, None, move |v| apply_answer(id, v));
+    }
+}
+
+/// Paint one mode's answer -- from the stream or from JSON, they are the same
+/// shape deliberately, so this function does not care which delivered it.
+fn apply_answer(id: u32, v: JsValue) {
+    // The screen moved on. Dropping it here is the whole point of the id.
+    if stale(id) {
+        return;
+    }
+    let s = mjs::store_ref("serp");
+    js::set_bool(&s, "loading", false);
+    let err = js::get_str(&v, "error");
+    if !err.is_empty() {
+        js::set_str(&s, "error", &err);
+        mjs::redraw();
+        return;
+    }
+    for k in ["crawl", "think", "ontology", "graph", "graphql", "fallback"] {
+        let got = js::get(&v, k);
+        if !js::is_missing(&got) {
+            js::set(&s, k, &got);
+        }
+    }
+    // Prefer the rows already painted by the fast fetch; take these only if the
+    // first one has not landed (or failed), so a slow rows request can be
+    // overtaken by the answer carrying its own copy rather than staying empty.
+    let search = js::get(&v, "search");
+    let have = js::get_num(&js::get(&s, "hits"), "length");
+    if have == 0.0 && !js::is_missing(&search) && !search.is_null() {
+        js::set(&s, "hits", &js::get(&search, "hits"));
+    }
+    mjs::redraw();
+}
+
+/// Follow one crawl as it happens. Falls back to the plain JSON request if the
+/// stream is unavailable or breaks: the final `result` event is byte-identical to
+/// what `/api/query` returns, so losing the progress feed never has to lose the
+/// answer.
+fn stream_crawl(q: &str, id: u32) {
+    let json_only = |q: String, id: u32| {
+        let path = format!("/api/query?q={}&mode=crawl", encode(&q));
+        api::get(&path, None, move |v| apply_answer(id, v));
+    };
+
+    let ctor = js::get(&js::global(), "EventSource");
+    if js::is_missing(&ctor) || ctor.is_null() {
+        json_only(q.to_string(), id);
+        return;
+    }
+    let args = js::new_array();
+    js::call(&args, "push", &[JsValue::from_str(&format!("/api/stream?q={}", encode(q)))]);
+    // `Reflect::construct` is typed on a callable, so the constructor has to be
+    // narrowed to a Function first -- and if `EventSource` is somehow not a
+    // function on this host, that is a reason to take the JSON path, not a panic.
+    let Ok(ctor_fn) = ctor.dyn_into::<js_sys::Function>() else {
+        json_only(q.to_string(), id);
+        return;
+    };
+    let Ok(source) = js_sys::Reflect::construct(&ctor_fn, &args) else {
+        json_only(q.to_string(), id);
+        return;
+    };
+
+    let on_step = Closure::wrap(Box::new(move |ev: JsValue| {
+        if stale(id) {
             return;
         }
-        for k in ["crawl", "think", "ontology", "graph", "graphql"] {
-            let got = js::get(&v, k);
-            if !js::is_missing(&got) {
-                js::set(&s, k, &got);
-            }
-        }
-        let search = js::get(&v, "search");
-        if !js::is_missing(&search) {
-            js::set(&s, "hits", &js::get(&search, "hits"));
-        }
+        let data = js::get_str(&ev, "data");
+        let Ok(p) = js_sys::JSON::parse(&data) else { return };
+        let s = mjs::store_ref("serp");
+        js::call(&js::get(&s, "steps"), "push", &[p.clone()]);
+        js::set_num(&s, "liveCalls", js::get_num(&p, "calls"));
+        js::set_str(&s, "liveStage", &js::get_str(&p, "stage"));
         mjs::redraw();
+    }) as Box<dyn FnMut(JsValue)>);
+
+    let q_for_result = q.to_string();
+    let on_result = Closure::wrap(Box::new(move |ev: JsValue| {
+        let data = js::get_str(&ev, "data");
+        let Ok(v) = js_sys::JSON::parse(&data) else {
+            json_only(q_for_result.clone(), id);
+            return;
+        };
+        apply_answer(id, v);
+    }) as Box<dyn FnMut(JsValue)>);
+
+    let q_for_error = q.to_string();
+    let on_error = Closure::wrap(Box::new(move |_ev: JsValue| {
+        // EventSource fires `error` for a dropped connection and then retries on
+        // its own. We do not want that here: a retry re-runs a crawl, and a crawl
+        // is billed to a GPU everyone shares. Close, and take the JSON answer.
+        STREAM.with(|c| {
+            if let Some(live) = c.borrow_mut().take() {
+                js::call(&live.source, "close", &[]);
+            }
+        });
+        if !stale(id) {
+            json_only(q_for_error.clone(), id);
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+
+    js::call(&source, "addEventListener", &[JsValue::from_str("step"), on_step.as_ref().clone()]);
+    js::call(&source, "addEventListener", &[JsValue::from_str("result"), on_result.as_ref().clone()]);
+    js::call(&source, "addEventListener", &[JsValue::from_str("error"), on_error.as_ref().clone()]);
+
+    STREAM.with(|c| {
+        *c.borrow_mut() = Some(Live { source, _step: on_step, _result: on_result, _error: on_error })
+    });
+}
+
+/// The elapsed clock. Mounted once per boot; it does nothing while a search is
+/// not running.
+///
+/// Direct DOM, one text node, ~30 Hz -- deliberately NOT a store field. m-js's
+/// redraw is the right tool for structure (a new step row appearing) and the
+/// wrong one for a counter that changes every frame: at three decimal places the
+/// store would be rewriting the subtree 30 times a second to move a few
+/// characters. So m-js owns the node and this writes its textContent.
+pub fn start_clock() {
+    lifecycle::every(33.0, || {
+        let s = mjs::store_ref("serp");
+        if !js::get_bool(&s, "loading") {
+            return;
+        }
+        let start = js::get_num(&s, "startedAt");
+        if start == 0.0 {
+            return;
+        }
+        let el = js::call(&js::get(&js::window(), "document"), "getElementById", &[JsValue::from_str("brain-elapsed")]);
+        if el.is_falsy() {
+            return;
+        }
+        let secs = (js_sys::Date::now() - start) / 1000.0;
+        js::set_str(&el, "textContent", &format!("{secs:.3}s"));
     });
 }
 

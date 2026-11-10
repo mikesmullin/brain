@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use crate::abox::{self, Entity};
 use crate::cli::{Args, Global};
@@ -23,6 +25,26 @@ pub struct Ctx {
     pub slot: Slot,
     pub chat: Chat,
     pub embedder: Option<Embedder>,
+    /// One crawl at a time, for the whole process.
+    ///
+    /// The back end is a single GPU serving both the chat model and the decision
+    /// slot, and the slot runs llama.cpp at `parallel: 1` -- so two overlapping
+    /// crawls do not gain throughput, they only interleave. Interleaving is what
+    /// makes them hard to reason about: the per-crawl `calls` figure is measured
+    /// as a window on a process-wide counter, so a second walker in flight leaks
+    /// its decisions into the first one's report.
+    ///
+    /// Admitting one walker at a time keeps the concurrency (everyone gets a task,
+    /// nobody is refused, connections stay open) while removing the parallelism
+    /// the hardware could not use anyway -- and as a side effect the window on
+    /// that shared counter becomes exact, because there is only ever one walk
+    /// inside it. This is the queue the back end was already imposing at llama.cpp;
+    /// doing it here makes it ordered, observable, and the single place to bound.
+    pub crawl_gate: Arc<tokio::sync::Semaphore>,
+    /// How many walkers are queued, including the one holding the gate. Read
+    /// before acquiring so an overload sheds to the cheap path instead of joining
+    /// a queue whose head is a 6 s walk.
+    pub crawl_waiting: Arc<AtomicUsize>,
 }
 
 impl Ctx {
@@ -48,7 +70,16 @@ impl Ctx {
         store.ensure_schema().await?;
         let slot = Slot::new(&brain.config.llm)?;
         let chat = Chat::new(&brain.config.llm)?;
-        let ctx = Ctx { brain, tbox, store, slot, chat, embedder };
+        let ctx = Ctx {
+            brain,
+            tbox,
+            store,
+            slot,
+            chat,
+            embedder,
+            crawl_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            crawl_waiting: Arc::new(AtomicUsize::new(0)),
+        };
         // Build only when the index is empty AND there is something to put in
         // it. A brain that has a schema and no entities yet — every brain, for
         // its first few commands — is not a brain with a stale index, and
@@ -991,12 +1022,17 @@ async fn load_cmd(argv: &[String], g: &Global) -> Result<i32> {
 // ─── the six query modes ────────────────────────────────────────────────────
 
 async fn crawl_cmd(argv: &[String], g: &Global) -> Result<i32> {
-    let a = Args::parse(argv, &["start", "kind", "steps"]);
+    let a = Args::parse(argv, &["start", "kind", "steps", "deadline"]);
     let question = a.rest();
     if question.trim().is_empty() {
         bail!("usage: crawl");
     }
     let ctx = Ctx::open(g).await?;
+    // No deadline by default here: `brain crawl` is the tool you reach for to see
+    // WHY a walk wandered, and cutting it off at 6 s hides the thing you came to
+    // look at. The browser path enforces the budget in web.rs instead. Pass
+    // `--deadline <ms>` to exercise the same guard the UI gets (`0` = unbounded).
+    let deadline_ms = a.num("deadline").filter(|n| *n > 0).map(|n| n as u64);
     let opts = query::crawl::CrawlOpts {
         start: a.get("start").map(|s| s.to_string()),
         kind: a.get("kind").map(|s| s.to_string()),
@@ -1004,6 +1040,10 @@ async fn crawl_cmd(argv: &[String], g: &Global) -> Result<i32> {
         trace: a.has("trace"),
         verbose: a.has("v") || a.has("verbose"),
         max_steps: a.num("steps").unwrap_or(query::crawl::MAX_STEPS as i64) as usize,
+        deadline_ms,
+        // No sink on the CLI: progress already reaches this path as stderr under
+        // -v, and there is no socket to push it to.
+        progress: None,
     };
     let r = query::crawl::run(
         &ctx.store,
