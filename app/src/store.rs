@@ -203,6 +203,12 @@ fn serp() {
         // ask for -- without it an ontology answer under a "crawl" heading reads
         // like a bug in the heading.
         .num("reqId", 0.0)
+        // Which request has already been allowed to answer. Two things can hand
+        // the same request a second payload: a stream the server closes fires
+        // `error`, and EventSource reconnects. Each would re-run the search and
+        // paste a differently-worded answer over one the reader is already
+        // reading -- so for a given request the FIRST answer wins.
+        .num("answeredId", 0.0)
         .num("startedAt", 0.0)
         .val("steps", &js::new_array().into())
         // Two scalars the step handler maintains alongside `steps`, so the
@@ -278,6 +284,7 @@ pub fn run_query(q: &str, mode: &str) {
     js::set_bool(&s, "loading", true);
     js::set_str(&s, "error", "");
     js::set_num(&s, "reqId", f64::from(id));
+    js::set_num(&s, "answeredId", 0.0);
     js::set_num(&s, "startedAt", js_sys::Date::now());
     for k in ["crawl", "think", "ontology", "graph", "graphql", "fallback"] {
         js::set(&s, k, &JsValue::NULL);
@@ -323,6 +330,9 @@ fn apply_answer(id: u32, v: JsValue) {
         return;
     }
     let s = mjs::store_ref("serp");
+    if js::get_num(&s, "answeredId") == f64::from(id) {
+        return; // this request already answered; a second wording is a regression
+    }
     js::set_bool(&s, "loading", false);
     let err = js::get_str(&v, "error");
     if !err.is_empty() {
@@ -343,6 +353,16 @@ fn apply_answer(id: u32, v: JsValue) {
     let have = js::get_num(&js::get(&s, "hits"), "length");
     if have == 0.0 && !js::is_missing(&search) && !search.is_null() {
         js::set(&s, "hits", &js::get(&search, "hits"));
+    }
+    // Claim this request once an answer has actually landed, so the guard at the
+    // top can reject any later re-delivery of it. Rows-only payloads deliberately
+    // do NOT claim: they would lock out the real answer arriving moments later.
+    for k in ["crawl", "ontology", "think"] {
+        let got = js::get(&s, k);
+        if !js::is_missing(&got) && !got.is_null() && !js::get_str(&got, "answer").is_empty() {
+            js::set_num(&s, "answeredId", f64::from(id));
+            break;
+        }
     }
     mjs::redraw();
 }
@@ -396,10 +416,17 @@ fn stream_crawl(q: &str, id: u32) {
             json_only(q_for_result.clone(), id);
             return;
         };
+        // Close BEFORE applying: the server ends the stream after its final event,
+        // and a closing connection makes EventSource fire `error`, which used to
+        // stamp "the stream ended before an answer arrived" beside a good answer.
+        STREAM.with(|c| {
+            if let Some(live) = c.borrow_mut().take() {
+                js::call(&live.source, "close", &[]);
+            }
+        });
         apply_answer(id, v);
     }) as Box<dyn FnMut(JsValue)>);
 
-    let q_for_error = q.to_string();
     let on_error = Closure::wrap(Box::new(move |_ev: JsValue| {
         // EventSource fires `error` for a dropped connection and then retries on
         // its own. We do not want that here: a retry re-runs a crawl, and a crawl
