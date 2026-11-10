@@ -515,9 +515,35 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
             head_only,
         ),
 
-        ("GET" | "HEAD", _) => match serve_static(&srv.args, path) {
-            Some(bytes) => Response::Full(bytes),
-            None => not_found(head_only),
+        ("GET" | "HEAD", _) => {
+            // The client owns every non-`/api/` route that is not a file: the
+            // router puts the query and mode into the path
+            // (`/search/<question>/crawl`, `/entity/<slug>`), so a refresh or a
+            // shared link asks the server for a path that exists only in the
+            // browser. Serving the app shell is the whole SPA contract -- and
+            // `web/index.html` references its assets absolutely (`/app.mjs`,
+            // `/kit.css`, `/styles.css`), so the shell boots at any depth.
+            //
+            // Two exclusions, both deliberate:
+            //
+            // * `/api/...` keeps 404-ing as JSON. Falling through here would
+            //   answer a mistyped API call with an HTML page, which a `fetch().
+            //   json()` caller reads as a parse failure -- far worse to debug
+            //   than a 404 with a name in it.
+            // * A missing ASSET keeps 404-ing. `styles.css` coming back as
+            //   `text/html` unstyled-the-app is a silent, confusing failure; a
+            //   404 points straight at the file that is not there.
+            if requires_exact_file(path) {
+                match serve_static(&srv.args, path) {
+                    Some(bytes) => static_response(bytes, head_only),
+                    None => not_found(head_only),
+                }
+            } else {
+                match serve_static(&srv.args, path).or_else(|| serve_shell(&srv.args)) {
+                    Some(bytes) => static_response(bytes, head_only),
+                    None => not_found(head_only),
+                }
+            }
         },
 
         _ => not_found(head_only),
@@ -544,6 +570,67 @@ async fn api(srv: &Arc<Server>, kind: Route, query: &str, head_only: bool) -> Re
         )
         .status(500),
     }
+}
+
+/// Wrap bytes built by [`render_static`] for the method that asked.
+///
+/// `render_static` always appends a body, and the write path ignores
+/// `Response::parts()`'s head-only flag -- suppression happens at construction,
+/// the way [`json_response`] does it. Handing HEAD a `Full` therefore sent 902
+/// bytes nobody asked for: `Content-Length` stayed correct, so curl and Chrome
+/// (which opens a separate connection for HEAD) never noticed, but a strict
+/// keep-alive client reads those bytes as the start of the NEXT response and
+/// desynchronises the connection. RFC 9110 is explicit: HEAD is GET without a
+/// body. Keep the head -- it already carries the right status, type, length and
+/// cache policy -- and drop everything after the header terminator.
+fn static_response(bytes: Vec<u8>, head_only: bool) -> Response {
+    if !head_only {
+        return Response::Full(bytes);
+    }
+    match bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(i) => Response::HeadOnly(bytes[..i + 4].to_vec()),
+        None => Response::HeadOnly(bytes),
+    }
+}
+
+/// Should this path be served strictly from disk -- 404 if the file is not there
+/// -- rather than answered by the app shell?
+///
+/// Decided on the last segment's extension, from a closed list -- NOT on "does
+/// it contain a dot". DST slugs and questions are full of dots (`info.crafting`,
+/// "What is Mr. Skitts?"), and treating those as assets would 404 a route the
+/// browser can happily render. Anything without a recognised extension is a
+/// route, and routes belong to the shell.
+fn requires_exact_file(path: &str) -> bool {
+    if path.starts_with("/api/") || path == "/api" {
+        return true;
+    }
+    let decoded = percent_decode(path);
+    let last = decoded.rsplit('/').next().unwrap_or("");
+    let Some((_, ext)) = last.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "css" | "js" | "mjs" | "json" | "wasm" | "html" | "htm" | "svg" | "png" | "jpg"
+            | "jpeg" | "gif" | "webp" | "ico" | "woff" | "woff2" | "ttf" | "map" | "txt"
+    )
+}
+
+/// The app shell, for a route only the client-side router understands.
+///
+/// Same bytes and same headers as `/`, including `no-cache` (a deploy must be
+/// visible immediately, not after the browser gives up on its copy). Serves the
+/// one file the caller already knows about, so a deep link can never widen what
+/// the static handler is able to read.
+fn serve_shell(args: &Args) -> Option<Vec<u8>> {
+    let app_root = args.web.canonicalize().ok()?;
+    let index = args.web.join("index.html").canonicalize().ok()?;
+    if !index.starts_with(&app_root) || !index.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(&index).ok()?;
+    Some(render_static(&index, &bytes, &app_root))
 }
 
 /// Path resolution, done without a filesystem walk that can escape.
