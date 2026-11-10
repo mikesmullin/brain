@@ -312,6 +312,31 @@ async fn class(ctx: &Ctx, name: &str, offset: i64, limit: i64) -> Result<Value> 
 /// burst of traffic from pinning connections and tasks behind a busy GPU.
 pub const CRAWL_QUEUE_CAP: usize = 8;
 
+/// Ceiling on one browser search, end to end -- queue wait, walk, ranked rows
+/// and any ontology fallback included.
+///
+/// The walk already has its own six-second budget, but that number bounds only
+/// the walk. Everything around it was unbounded: waiting for the gate had no
+/// timeout at all, so a search could sit behind a stalled walker indefinitely and
+/// the user saw a spinner forever. Twenty seconds is the point at which "still
+/// thinking" has become "not coming back" from a reader's point of view.
+///
+/// Overridable with `BRAIN_SEARCH_DEADLINE_MS`, and clamped well below the 600 s
+/// the old HTTP client would have tolerated.
+pub const SEARCH_DEADLINE_MS: u64 = 20_000;
+
+pub fn search_deadline() -> std::time::Duration {
+    static ONCE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| {
+        let ms = std::env::var("BRAIN_SEARCH_DEADLINE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(SEARCH_DEADLINE_MS);
+        std::time::Duration::from_millis(ms.clamp(500, 120_000))
+    })
+}
+
 /// Restores the queue depth however the walk ends -- returned, errored or panicked.
 ///
 /// A plain decrement after the call would strand the count on the error paths, and
@@ -343,8 +368,30 @@ async fn rows(ctx: &Ctx, q: &str, limit: i64) -> Value {
 }
 
 /// An ontology answer, with the crawl's own account of why it is not here.
-async fn ontology_payload(ctx: &Ctx, q: &str, fallback: Value, search: Value) -> Result<Value> {
-    let o = query::ontology::run(&ctx.store, &ctx.tbox, &ctx.chat, q, None).await?;
+async fn ontology_payload(
+    ctx: &Ctx,
+    q: &str,
+    fallback: Value,
+    search: Value,
+    hard_deadline: std::time::Instant,
+) -> Result<Value> {
+    // The fallback is model work too, and it runs when the model has ALREADY
+    // failed to answer in time. So it gets only what the ceiling leaves, and if
+    // there is nothing left the search degrades to its ranked rows -- which are
+    // BM25+RRF from Postgres, need no GPU at all, and were measured at 8 ms. A
+    // dead model must never be able to cost a user both the answer and the rows.
+    let left = hard_deadline.saturating_duration_since(std::time::Instant::now());
+    let o = match tokio::time::timeout(left, query::ontology::run(&ctx.store, &ctx.tbox, &ctx.chat, q, None)).await {
+        Ok(Ok(o)) => o,
+        // Timed out or failed: still deliver everything that did not need the GPU.
+        _ => {
+            return Ok(json!({
+                "mode": "search",
+                "search": search,
+                "fallback": fallback,
+            }))
+        }
+    };
     Ok(json!({
         "mode": "ontology",
         "ontology": serde_json::to_value(o)?,
@@ -367,6 +414,15 @@ pub async fn crawl_payload(
     limit: i64,
     progress: Option<tokio::sync::mpsc::UnboundedSender<query::crawl::Progress>>,
 ) -> Result<Value> {
+    // Set once, at entry, and honoured by EVERY await below -- including the
+    // fallbacks. A ceiling that bounds only the walk is not a ceiling: measured
+    // against a model endpoint that accepts connections and never answers, a 6 s
+    // budget still took 8.05 s, because the ontology fallback ran afterwards with
+    // no limit of its own. The promise this function makes to a reader watching a
+    // spinner is "you will have an answer, or something, by this instant".
+    let started = std::time::Instant::now();
+    let hard_deadline = started + search_deadline();
+    let remaining = || hard_deadline.saturating_duration_since(std::time::Instant::now());
     // ---- admission: one walk at a time ---------------------------------------
     // Shed first, then queue. Overloaded requests get the ontology answer
     // immediately rather than holding a socket for minutes: it is the same
@@ -387,22 +443,41 @@ pub async fn crawl_payload(
                 "budgetMs": query::crawl::deadline_ms().unwrap_or(query::crawl::CRAWL_DEADLINE_MS),
             }),
             rows(ctx, q, limit).await,
+            hard_deadline,
         )
         .await;
     }
     ctx.crawl_waiting.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _queue = QueueGuard(std::sync::Arc::clone(&ctx.crawl_waiting));
-    let Ok(permit) = std::sync::Arc::clone(&ctx.crawl_gate).acquire_owned().await else {
+
+    // Waiting for the gate is now bounded too. A stalled walker used to make
+    // everyone behind it wait ten minutes on a request that was never coming;
+    // past the deadline we answer from the ontology and say so.
+    let Ok(Ok(permit)) =
+        tokio::time::timeout(remaining(), std::sync::Arc::clone(&ctx.crawl_gate).acquire_owned()).await
+    else {
         return ontology_payload(
             ctx,
             q,
-            json!({ "from": "crawl", "reason": "gate-closed" }),
+            json!({
+                "from": "crawl",
+                "reason": if started.elapsed() >= search_deadline() { "queue-timeout" } else { "gate-closed" },
+                "waitedMs": started.elapsed().as_millis() as u64,
+                "deadlineMs": search_deadline().as_millis() as u64,
+            }),
             rows(ctx, q, limit).await,
+            hard_deadline,
         )
         .await;
     };
 
-    let r = query::crawl::run(
+    // The walk itself, still inside the same ceiling. On expiry we release the
+    // gate BEFORE answering from the ontology: holding the only permit while
+    // running a fallback would make the next searcher wait for work that is
+    // already known to be too slow. Dropping the walk's future also drops its
+    // in-flight request, so the GPU stops paying for an answer nobody is waiting
+    // for -- the cancellation the SSE stream could not otherwise provide.
+    let r = match tokio::time::timeout(remaining(), query::crawl::run(
         &ctx.store,
         &ctx.tbox,
         &ctx.slot,
@@ -414,9 +489,27 @@ pub async fn crawl_payload(
             progress,
             ..Default::default()
         },
-    )
+    ))
     .await
-    .context("crawl")?;
+    {
+        Ok(r) => r.context("crawl")?,
+        Err(_) => {
+            drop(permit);
+            return ontology_payload(
+                ctx,
+                q,
+                json!({
+                    "from": "crawl",
+                    "reason": "search-timeout",
+                    "deadlineMs": search_deadline().as_millis() as u64,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                }),
+                rows(ctx, q, limit).await,
+                hard_deadline,
+            )
+            .await;
+        }
+    };
     // The walk is done; the GPU is free for the next searcher. What remains is a
     // BM25 pass and possibly one short ontology answer, neither of which should
     // keep a queue behind us.
@@ -450,6 +543,7 @@ pub async fn crawl_payload(
                 "collected": r.collected.len(),
             }),
             search,
+            hard_deadline,
         )
         .await;
     }

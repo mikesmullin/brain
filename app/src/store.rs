@@ -409,8 +409,21 @@ fn stream_crawl(q: &str, id: u32) {
                 js::call(&live.source, "close", &[]);
             }
         });
+        // Report it; do not silently re-queue. The old behaviour was to fire the
+        // plain JSON crawl here, which meant one stalled search became two --
+        // both queued behind the same stuck gate -- and the user saw a spinner
+        // forever with no explanation. The stream ceiling is now shorter than the
+        // search ceiling, so reaching this handler genuinely means the answer is
+        // not coming: the honest thing is to say so and let the reader decide.
         if !stale(id) {
-            json_only(q_for_error.clone(), id);
+            let s = mjs::store_ref("serp");
+            js::set_bool(&s, "loading", false);
+            js::set_str(
+                &s,
+                "error",
+                "the search stream ended before an answer arrived — try again",
+            );
+            mjs::redraw();
         }
     }) as Box<dyn FnMut(JsValue)>);
 

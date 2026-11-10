@@ -345,6 +345,17 @@ fn search(params: JsValue) -> JsValue {
             "gate-closed" => {
                 "the search queue is shutting down — answering from the ontology instead".to_string()
             }
+            // Two more ways to lose the walk, both meaning "the model did not come
+            // back in time" but differing in whether we even started: worth saying
+            // apart, because one is congestion and the other is a hung back end.
+            "queue-timeout" => format!(
+                "too many searches ahead of yours — showing ranked results after {:.1}s",
+                js::get_num(&f, "waitedMs") / 1000.0
+            ),
+            "search-timeout" => format!(
+                "the model did not answer within {:.1}s — showing ranked results",
+                js::get_num(&f, "deadlineMs") / 1000.0
+            ),
             _ => format!(
                 "crawl stopped at its {:.1}s budget after {} step(s) / {} decision(s) — answering from the ontology instead",
                 // One decimal, not an integer: a sub-second budget would otherwise

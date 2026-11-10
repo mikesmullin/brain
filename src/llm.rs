@@ -28,9 +28,33 @@ use std::time::Duration;
 
 use crate::config::{self, LlmConfig};
 
+/// How long one model round trip may take before we abandon it.
+///
+/// This was 600 s, and the number was wrong in a way that only a shared GPU
+/// exposes. The same client serves the decision slot and the chat finaliser, and
+/// the crawl gate admits exactly one walk at a time -- so a single stalled call
+/// (a saturated `parallel: 1` llama.cpp queue, or a node re-placed into another
+/// region mid-request) pinned the entire search feature for ten minutes while the
+/// pod stayed perfectly healthy. Observed in production: three UI searches ran to
+/// the stream ceiling with no result at all, and every search behind them queued.
+///
+/// Ten seconds, because a decision that slow is not worth waiting for: the walk's
+/// own budget is six, one dropped call is recoverable (the walk treats it as
+/// unanswered and moves on) whereas a pinned gate is not. Override with
+/// `BRAIN_LLM_TIMEOUT_MS`; clamped to a minute so a typo cannot re-create the
+/// original ten-minute hang.
 fn client() -> Result<reqwest::Client> {
+    static TO: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    let timeout = *TO.get_or_init(|| {
+        let ms = std::env::var("BRAIN_LLM_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000);
+        Duration::from_millis(ms.clamp(250, 60_000))
+    });
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(600))
+        .timeout(timeout)
         .build()
         .context("building the http client")
 }

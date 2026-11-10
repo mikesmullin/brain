@@ -112,7 +112,12 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// an ontology fallback after that budget is spent, and this task holds a socket
 /// plus an `in_flight` slot while it does -- so the stream gets its own backstop
 /// rather than inheriting whatever the slowest leg happens to take.
-const STREAM_TIMEOUT: Duration = Duration::from_secs(45);
+/// Ceiling on one `/api/stream` response: the search ceiling plus enough slack to
+/// deliver a final `result` or `error` event, so a client is never left holding an
+/// open stream that has already been abandoned upstream. It used to be a 45 s
+/// guess, which meant the browser waited 45 s to learn that the walk was gone --
+/// and then re-queued a second crawl behind it.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub struct Args {
     pub host: IpAddr,
