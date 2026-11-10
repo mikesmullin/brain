@@ -54,6 +54,53 @@ pub const GOAL_T: f64 = 0.7;
 pub const KIND_NONE: &str = "*none*";
 pub const FILTER_NONE: &str = "*none*";
 
+/// The question in the form the DECISION SLOT should see it: trimmed, inner
+/// whitespace collapsed, and lower-cased.
+///
+/// The slot is a 4B non-autoregressive model, and its `noul` output sits against
+/// a gate with almost no margin — see [`GOAL_T`]'s note that the false side moved
+/// 0.216 under a single prompt edit. That makes a *typographic* property of the
+/// question able to decide the walk. Measured on dstwiki, five spellings of one
+/// question, identical brain/DB/budget, only the casing differing:
+///
+///   "what do beefalo eat?"      4 calls, ends `stopped`,  kind=Item
+///   "What do beefalo eat?"      4 calls, ends `stopped`,  kind=Item
+///   "What do Beefalo eat?"    161 calls, ends `no_answer`, kind=Animal
+///   "WHAT DO BEEFALO EAT?"      4 calls, ends `stopped`,  kind=Item
+///   "What Do Beefalo Eat?"      5 calls, ends `stopped`,  kind=Item
+///
+/// Not monotonic in case, and not a bug in brain's matching either — object
+/// resolution is identical in all five (`jump:Animal/Beefalo`). The capitalised
+/// form simply nudged the SUBJECT'S own goal noul across 0.7, which commits the
+/// thing the question is ABOUT as its answer and binds `answer slot = every
+/// Animal`. Users type proper nouns capitalised, so the failing spelling is the
+/// one people actually use; the question suite is written lower-case and so never
+/// saw it.
+///
+/// Canonicalising the question the slot reads collapses every spelling onto the
+/// known-good one. Scope is deliberately narrow:
+///
+/// * The FINALIZER still receives the question verbatim ([`run`]'s chat prompt).
+///   It is phrasing prose for a human; flattening its casing there buys nothing
+///   and can cost emphasis ("I", acronyms, proper nouns in the reply).
+/// * Node records, search terms and BM25 are untouched — `w.full(node)` keeps its
+///   casing, so the noul can still read a name that only lives in the node's name.
+/// * Local text heuristics (`answer_kind_fast`, `relation_kind`,
+///   `wants_single_best`) keep seeing the raw question, so their measured
+///   behaviour is unchanged.
+///
+/// What this does NOT fix: it removes the commonest trigger, not the sensitivity.
+/// Any other perturbation — a stray "the", different punctuation — can still move
+/// a borderline judgement across the gate. The structural answer is to stop
+/// committing the question's own subject as its answer, and to stop binding
+/// whole-class answer slots that cannot be enumerated inside `MAX_STEPS` (Animal
+/// has 211 members and `MAX_STEPS` is 160, so "which animals are hostile?" fails
+/// at ANY casing — lower-cased included, which is the proof this is a second,
+/// independent defect).
+fn canon_question(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 const MAX_MOVES: usize = 24;
 const MAX_SEARCH_FRESH: usize = 40;
 const MAX_CLASS_ENUM: usize = 64;
@@ -928,6 +975,12 @@ pub struct Crawl {
 }
 
 impl Crawl {
+    /// The question as the decision slot should see it — see [`canon_question`]
+    /// for why the slot and the finalizer are deliberately given different text.
+    pub fn asked(&self) -> String {
+        canon_question(&self.prompt)
+    }
+
     pub fn new(prompt: &str, start: Option<String>, shortlist: Vec<String>, question_objs: Vec<String>) -> Crawl {
         let mut c = Crawl {
             prompt: prompt.to_string(),
@@ -1706,7 +1759,7 @@ pub fn nav_choice(c: &Crawl, w: &World, opts: &Options, stage: Stage) -> Questio
         let mut s = String::from(
             "You are about to walk a knowledge graph to answer a question, but first you must find your STARTING POINT.\n",
         );
-        s += &format!("\nQUESTION: \"{}\"\n", c.prompt);
+        s += &format!("\nQUESTION: \"{}\"\n", c.asked());
         if let Some(k) = &kind {
             s += &format!("\nThe question's ANSWER will be a {k} node. That is NOT what you are picking now.\n");
         }
@@ -1762,7 +1815,7 @@ If none of the listed nodes fits, pick a search that would surface it.\n\
 You are NOT deciding whether the current node is the answer, and NOT deciding whether to finish -- \
 those are asked separately. Choose the move that best advances toward the answer.\n\
 \nQUESTION: \"{}\"\n{kind_line}{where_}{chain}{done}{trunc}",
-        c.prompt
+        c.asked()
     );
 
     let tail = match stage {
@@ -1908,7 +1961,7 @@ a field named after the question.\n\
 Answer FALSE when this record is about something else entirely, or when it is about the\n\
 right thing but says nothing on the point actually asked -- being related to the subject\n\
 is not the same as answering the question about it.",
-            c.prompt,
+            c.asked(),
             w.full(node)
         ));
     }
@@ -1940,7 +1993,7 @@ Answer TRUE only when every one of these is satisfied:\n{kind_clause}\
     with X. Read the node's own fields above to check each one.\n\
 Answer FALSE when the node is the wrong type, when it is not the sort of thing the\n\
 question is about, or when it breaks a restriction{}",
-        c.prompt,
+        c.asked(),
         w.full(node),
         if class_slot { ".\n" } else { ", or when it is merely a hub/waypoint whose neighbours contain the answers.\n" }
     ))
@@ -2000,7 +2053,7 @@ The answer is a {kind} node.\n\
 ITSELF -- something you would check by reading that node's own record? Pick which sort of\n\
 thing it says, or {FILTER_NONE} if it says nothing about the answer itself at all.\n\
 \nPick exactly one:",
-            c.prompt
+            c.asked()
         ),
     )
 }
@@ -2020,7 +2073,7 @@ out. Where the question names a quantity (health, damage, speed, cost), compare 
 quantity: the fields are quoted verbatim from the source, so a value may be prose rather\n\
 than a bare number -- read the whole of it and compare the totals it describes.\n\n\
 Pick exactly one:",
-            c.prompt,
+            c.asked(),
             c.collected.len()
         ),
     )
@@ -2038,11 +2091,11 @@ Pick exactly one:",
 pub fn state_view(c: &Crawl, names: &[String]) -> String {
     let judgement_only = !names.is_empty() && names.iter().all(|n| n == "goal" || n == "filter");
     if judgement_only {
-        return serde_json::json!({ "question": c.prompt }).to_string();
+        return serde_json::json!({ "question": c.asked() }).to_string();
     }
     let tail = c.seen.len().saturating_sub(8);
     serde_json::json!({
-        "question": c.prompt,
+        "question": c.asked(),
         "cursor": c.cursor,
         "collected": c.collected,
         "seen": &c.seen[tail..],
@@ -2624,8 +2677,8 @@ async fn resolve_kind(
     let examples = w.class_examples().await?;
     let nclasses = examples.len();
     let mut qs = BTreeMap::new();
-    qs.insert("kind".to_string(), kind_question(&c.prompt, &examples));
-    let state = serde_json::json!({ "question": c.prompt }).to_string();
+    qs.insert("kind".to_string(), kind_question(&c.asked(), &examples));
+    let state = serde_json::json!({ "question": c.asked() }).to_string();
     let got = slot.ask(&state, &qs).await.unwrap_or_default();
     let ans = got.get("kind").cloned().unwrap_or_default();
     let choice = ans.choice.clone();
@@ -2957,6 +3010,27 @@ pub async fn run(
     opts: &CrawlOpts,
 ) -> Result<CrawlResult> {
     let t0 = std::time::Instant::now();
+    // Model-call accounting is per-crawl, not per-process.
+    //
+    // `Slot` owns one lifetime counter, which is invisible in the CLI: a command
+    // opens one process and one crawl, so the lifetime total and the crawl's
+    // spend are the same number. Under `brain serve` the store is opened once and
+    // reused, so reporting `slot.counters()` directly reported everything the
+    // process had ever done — measured on a fresh pod: the first crawl said
+    // `calls: 161`, the identical second crawl said `calls: 322`, exactly double,
+    // and it keeps climbing from there. The natural reading is a model suddenly
+    // working far harder at the same question, which sends you looking at prompts
+    // and at the gateway instead of at a counter that was never reset.
+    //
+    // Snapshot at entry, subtract at exit, so the field answers "what did THIS
+    // crawl do" in both modes. Exact for the CLI and for a server running one
+    // crawl at a time; under genuinely parallel crawls the two ranges overlap and
+    // each result includes some of the other's calls. Being exact there wants a
+    // request-scoped counter threaded into `ask()` rather than owned by the
+    // client, which touches every caller of `Slot` — deliberately not done for a
+    // case the single replica does not produce, but that is the real fix if this
+    // ever serves more than one in-flight crawl.
+    let (calls0, tokens0) = slot.counters();
     let mut log = |m: &str| {
         if opts.verbose {
             eprintln!("{m}");
@@ -3066,7 +3140,13 @@ pub async fn run(
     let got = c.collected.clone();
     w.ensure_rows(&got).await?;
     let labels: Vec<String> = got.iter().map(|s| w.label(s)).collect();
-    let (calls, tokens) = slot.counters();
+    // Saturating, not wrapping: these are monotonic `fetch_add` counters, so a
+    // negative delta is impossible today — but a future reset-on-rotate, or a
+    // client shared across a restart, would otherwise surface as a nonsense
+    // number rather than a floor of zero.
+    let (calls_total, tokens_total) = slot.counters();
+    let calls = calls_total.saturating_sub(calls0);
+    let tokens = tokens_total.saturating_sub(tokens0);
     let mut answer = None;
     if opts.finalize {
         if let Some(chat) = chat {
