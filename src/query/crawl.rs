@@ -120,7 +120,7 @@ pub const MAX_STEPS: usize = 160;
 /// `MAX_STEPS` bounds how long a walk may WANDER, but it does not bound how long
 /// it may TAKE, and those are different limits when the thing being metered is a
 /// GPU. A walk that runs to the cap makes ~161 sequential slot calls; measured on
-/// `brain-wiki.sre.blz.dev`, those cost 89 s, 131 s and 227 s. The server log was
+/// `brain.example.com`, those cost 89 s, 131 s and 227 s. The server log was
 /// bimodal -- 7 s when the walk converged, minutes when it did not -- for what was
 /// often the same question, because the commit gate has almost no margin (see
 /// [`GOAL_T`]) and a 4B decision model can be flipped by punctuation.

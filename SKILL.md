@@ -96,12 +96,20 @@ an interpreter.
 ## Run
 
 ```sh
+brain corpus pull                    # clone/refresh the corpora a server serves
 brain pg install && brain pg start   # the shared PostgreSQL, once per machine
 brain reindex                        # the ONE .md -> index path
 brain validate                       # schema + lint findings; exits 1 on error
 brain web                            # the wiki, with crawl behind the search bar
 brain mcp                            # stdio MCP server
 ```
+
+`brain web` and `brain serve` serve **every brain they can find** — a
+`--corpora` file if one is named (it replaces the registry as the set), the one
+`--db`/`--use` resolves to, then `--brain <alias>=<path>`, then
+`~/.config/brain/brains.yaml` — and switch between them from a selector in the
+header. The URL names the database (`/alpha/e/Person/jdoe`, `/beta/`), each
+brain indexes into its own PostgreSQL schema, and `/` lands on the default.
 
 **Rebuilding is opt-in.** A command rebuilds only when the index is *empty*,
 and the staleness check is skipped too. A stale index can serve slugs the files
@@ -114,8 +122,17 @@ maintenance.
 
 ## Gotchas
 
+- A corpus is a repository, described by `corpora.yaml` (`repo`, `ref`, `subdir`,
+  `dest`) and pulled shallow. `brain corpus pull` clones/refreshes and reindexes
+  only what moved; `POST /api/corpus/refresh` does the same against a running
+  server (authenticated by `BRAIN_WEBHOOK_SECRET`), so a corpus change needs no
+  restart. PostgreSQL is derived from the `.md` files and is disposable.
 - Slug lookups are case-insensitive, but the stored form is the schema's class
   casing with a lowercase id.
+- A brain names itself with `alias:` in `brain.yaml`, and the alias is what the
+  wiki URLs and the PostgreSQL schema use (`pg.schema:` pins the schema
+  explicitly). Sibling coord repos all keep their brain in `.brain/`, so without
+  an alias they would all be called "brain" and share one schema.
 - `graph` always reports `capped`: a result that stopped at the circuit breaker
   is a different fact from one that ran out of graph.
 - `graphql` may be passed as an argument or piped via stdin / heredoc.

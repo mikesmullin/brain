@@ -81,10 +81,10 @@ RUN set -eu \
 # ── runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-# Load-bearing, so nobody prunes it later: ca-certificates (TLS to the model gateway and to github.com for the data clone — both boot dependencies), git (the entrypoint clones the corpus), curl (HEALTHCHECK only).
+# Load-bearing, so nobody prunes it later: ca-certificates (TLS to the model gateway and to the git host the corpora come from — both boot dependencies), git + openssh-client (the initContainer clones the corpora, over https or ssh depending on how the deployment authenticates), curl (HEALTHCHECK only).
 COPY build/certs/ /usr/local/share/ca-certificates/
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git curl \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client curl \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -104,6 +104,7 @@ COPY --from=build /src/web ./web
 # Copied to a sibling dir, not into web/, so the app root stays exactly what `git ls-files web/` says and the shadowing rule stays the server's.
 COPY --from=build /src/vendor/rustex1/kit/web ./kit
 COPY deploy/entrypoint.sh /usr/local/bin/brain-wiki-entrypoint
+COPY deploy/corpora.example.yaml ./corpora.example.yaml
 
 # The glibc guard: runs the binary the way the entrypoint will, because a build/runtime libc mismatch otherwise surfaces as a CrashLoopBackOff after a 30 s start-period.
 RUN /opt/brain/brain --version \

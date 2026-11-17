@@ -53,6 +53,7 @@ fill your data: (A-BOX / VALUES)
   call        invoke a component method on an entity
 
 work with external data:
+  corpus      clone/refresh the corpora a server serves (see corpora.yaml)
   ingest      recursively read .md docs, auto-creating entities and schema (LLM)
   enrich      rewrite .md docs with [[wiki-links]]
   load        import an already-structured dataset (no LLM; benchmark/fixture)
@@ -444,12 +445,13 @@ Examples:
 "#,
         "serve" => r#"Usage:
     brain serve [--host H] [--port N] [--web DIR] [--assets DIR...] [--name N]
-                [--pkg-js URL] [--pkg-wasm URL] [--quiet]
+                [--pkg-js URL] [--pkg-wasm URL] [--brain ALIAS=PATH...]
+                [--corpora PATH] [--quiet]
 
 Description:
     Serve the wiki to real traffic: no watcher, no rebuild, no self-restart,
-    and a clean SIGTERM drain. Same page and same four JSON routes as
-    `brain web`, which stays the development command.
+    and a clean SIGTERM drain. Same page and same JSON routes as `brain web`,
+    which stays the development command.
 
     The socket binds before the database opens, so /health answers from the
     first instant and reports "ready": false until PostgreSQL is connected,
@@ -461,9 +463,21 @@ Description:
     proxy and an identity provider belong in front of it before any network can
     reach it. Loopback remains the default bind for that reason.
 
+Brains:
+    Every API route names its database (`?db=alpha`), the page's first path
+    segment names it too (`/alpha/e/Person/jdoe`), and each brain indexes
+    into its own PostgreSQL schema. `/` redirects to the default brain.
+    The set served is (1) the brain --db/--use resolves to, (2) every
+    --brain ALIAS=PATH, and (3) every brain in ~/.config/brain/brains.yaml,
+    so a machine's inventory shows up in the selector without flags. A
+    container with no registry serves exactly one brain.
+
 Flags:
     --host      bind address (default: 127.0.0.1; a container passes 0.0.0.0)
     --port      HTTP port (default: 8080)
+    --brain     add a brain to the selector: ALIAS=PATH (repeatable)
+    --corpora   serve the corpora in this file: it replaces the per-user registry
+                as the set, and `POST /api/corpus/refresh` pulls from it
     --web       static root holding index.html and pkg/ (default: ./web)
     --assets    extra static root, searched after --web (repeatable). This is
                 where the rustex1 kit's web/ goes, for app.mjs, hot.mjs,
@@ -515,7 +529,7 @@ Examples:
     brain server components
 "#,
         "web" => r#"Usage:
-    brain web [--port N] [--host H] [--open]
+    brain web [--port N] [--host H] [--open] [--brain ALIAS=PATH...] [--corpora PATH]
 
 Description:
     Browse the brain as a wiki: one page per entity, its fields rendered as a
@@ -531,10 +545,67 @@ Options:
     --port   HTTP port (default: 4321)
     --host   bind address (default: 127.0.0.1)
     --open   also launch a browser
+    --brain  add a brain to the selector: ALIAS=PATH (repeatable)
+    --corpora  serve the corpora in this file (replaces the registry as the set)
+
+Brains:
+    One process serves every brain it can find, and the selector in the header
+    switches between them. The URL says which one a page is about
+    (`/alpha`, `/beta/e/Product/example`), so a link opens the graph it names.
+    Sources, in order: the brain --db/--use resolves to (the default), each
+    --brain ALIAS=PATH, then everything registered in
+    ~/.config/brain/brains.yaml. Each brain names itself in its own
+    `brain.yaml` (`alias:`), which is how sibling coord repos — all of which
+    keep their brain in `.brain/` — stay distinct and land in separate
+    PostgreSQL schemas.
 
 Examples:
     brain web
     brain web --port 8080
+    brain --db .brain web --brain beta=../beta/coord/.brain
+"#,
+        "corpus" => r#"Usage:
+    brain corpus pull [--file PATH] [--dest DIR] [--alias N...] [--no-reindex] [--json]
+    brain corpus list [--file PATH] [--dest DIR] [--json]
+
+Description:
+    Materialise the corpora a server serves, from a `corpora.yaml`:
+
+        default: alpha
+        corpora:
+          alpha:
+            repo: https://git.example.com/alpha/coord.git
+            ref: main
+            subdir: .brain        # where the brain lives inside the repo
+            dest: /data/corpora/alpha
+
+    `pull` shallow-clones any corpus that is not on disk yet, refreshes the rest
+    with `fetch --depth 1` + `reset --hard` (only the new commits), and reindexes
+    the brains whose SHA actually moved. `list` prints what is configured and
+    which SHA each checkout is at.
+
+    This is the same code the servers call for `POST /api/corpus/refresh`, so a
+    boot, a webhook and a hand-run pull cannot disagree about what "current"
+    means. PostgreSQL is derived and disposable: a refresh truncates and rebuilds
+    the index from the `.md` files, and nothing needs preserving between pulls.
+
+    A corpus that cannot be *cloned* fails the command (exit 1) — a wiki with no
+    pages that answers 200 is worse than one that says why. A corpus that cannot
+    be *refreshed* falls back to the checkout on disk, reports `stale`, and exits
+    0, because stale service beats no service.
+
+Flags:
+    --file       corpora file (default: $BRAIN_CORPORA)
+    --dest       root for aliases without an explicit `dest:` (default:
+                 $BRAIN_CORPORA_DIR, else `corpora/` beside the file)
+    --alias      restrict to one corpus (repeatable; default: all)
+    --no-reindex pull only; leave the indexes alone
+    --json       machine-readable report (pull) or inventory (list)
+
+Examples:
+    brain corpus list
+    brain corpus pull --alias alpha
+    brain corpus pull --file /opt/brain/corpora.yaml --dest /data/corpora --json
 "#,
         "crawl" => r#"Usage:
     brain crawl <question> [--start <slug>] [--kind <Class>] [--steps N]
@@ -753,6 +824,7 @@ pub const COMMANDS: &[&str] = &[
     "init", "def", "schema", "new", "set", "link", "get", "ls", "rm", "validate", "reindex",
     "export", "load", "convert", "pg", "serve", "server", "search", "ingest", "enrich", "graph",
     "think", "ontology", "graphql", "crawl", "web", "mcp", "use", "bench", "call", "refine",
+    "corpus",
 ];
 
 /// Small helper for the hand-rolled flag parsing each command does.

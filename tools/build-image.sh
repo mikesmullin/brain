@@ -160,6 +160,11 @@ say "stage image inputs"
 # The recipe COPYs nothing else from target/, which means "not in build/out" and
 # "not in the image" are the same statement.
 rm -rf build/out && mkdir -p build/out
+# No corpus is staged here, on purpose: corpora are repositories, pulled by the
+# container at boot (`brain corpus pull`) and refreshed at runtime
+# (`POST /api/corpus/refresh`). Baking one would make this image a function of two
+# repositories, so a tag naming one of them would be a provenance lie — see
+# deploy/entrypoint.sh.
 cp "$SERVER_BIN" build/out/brain
 chmod 755 build/out/brain
 [ -s build/out/brain ] || die "staging produced an empty binary"

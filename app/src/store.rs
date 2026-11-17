@@ -45,15 +45,76 @@ fn stale(id: u32) -> bool {
     js::get_num(&mjs::store_ref("serp"), "reqId") != f64::from(id)
 }
 
-/// The modes the search bar offers, in the order it offers them. `crawl` is
-/// first because it is the default for any UI search.
+/// The modes the search bar offers, in the order it offers them. `ontology`
+/// is the UI default for natural-language questions.
 pub const MODES: &[&str] = &["crawl", "search", "think", "ontology", "graph", "graphql"];
 
 pub fn register() {
+    dbs();
     meta();
     nav();
     page();
     serp();
+}
+
+// ── which brain ─────────────────────────────────────────────────────────────
+
+/// The brains this server offers, and the one a bare `/` means.
+///
+/// One fetch per boot: the list is the server's configuration, so it does not
+/// move while the process is up. Every page's selector reads it, and the meta
+/// store follows whichever entry the URL names.
+fn dbs() {
+    let mut d = Def::new();
+    d.bool("loaded", false)
+        // In flight. The landing route and the boot hook can both ask before the
+        // first answer lands, and two identical requests for a list that cannot
+        // change is one too many.
+        .bool("loading", false)
+        .str("default", "")
+        .str("error", "")
+        .val("list", &js::new_array().into());
+    mjs::store("dbs", &d.finish());
+}
+
+pub fn load_dbs() {
+    let s = mjs::store_ref("dbs");
+    if js::get_bool(&s, "loaded") || js::get_bool(&s, "loading") {
+        return;
+    }
+    js::set_bool(&s, "loading", true);
+    api::get("/api/brains", None, move |v| {
+        let s = mjs::store_ref("dbs");
+        js::set_bool(&s, "loading", false);
+        let err = js::get_str(&v, "error");
+        if !err.is_empty() {
+            js::set_str(&s, "error", &err);
+            js::set_bool(&s, "loaded", true);
+            mjs::redraw();
+            return;
+        }
+        js::set_str(&s, "default", &js::get_str(&v, "default"));
+        js::set(&s, "list", &js::get(&v, "brains"));
+        js::set_bool(&s, "loaded", true);
+        mjs::redraw();
+        // The URL carries the database (`/alpha/…`). A boot at `/` has none, so it
+        // lands on the server's default rather than staying on a page that names
+        // nothing. Deferred one turn: this runs inside the boot's own callback,
+        // and navigating mid-boot would re-enter the router before it has
+        // finished its first render.
+        if is_root_uri() {
+            let default = js::get_str(&v, "default");
+            if !default.is_empty() {
+                lifecycle::after(0.0, move || mjs::router_set(&format!("/{default}")));
+            }
+        }
+    });
+}
+
+/// Is the address bar at the bare root?
+fn is_root_uri() -> bool {
+    let uri = mjs::router_uri();
+    uri.is_empty() || uri == "/"
 }
 
 // ── the graph's own identity: ontology, counts, schema ──────────────────────
@@ -61,6 +122,10 @@ pub fn register() {
 fn meta() {
     let mut d = Def::new();
     d.bool("loaded", false)
+        // Which brain this page is about. The selector binds to this, and every
+        // internal href is built from it, so the URL and the data can never
+        // disagree about which database is on screen.
+        .str("db", "")
         .str("ontology", "brain")
         .str("brain", "")
         .num("entities", 0.0)
@@ -73,14 +138,43 @@ fn meta() {
     mjs::store("meta", &d.finish());
 }
 
-/// Fetched once per boot. Cheap, and every page's sidebar reads it.
-pub fn load_meta() {
+/// One fetch per database, kept: the schema and the counts change only when
+/// someone reindexes, and every page's sidebar reads them.
+///
+/// Switching databases resets the store before the fetch rather than painting
+/// the previous brain's counts under the new brain's name. The `db` guard in the
+/// callback does the same for the return trip, in case a slow answer for the
+/// brain you left arrives after the one you are reading.
+pub fn load_meta(db: &str) {
     let s = mjs::store_ref("meta");
-    if js::get_bool(&s, "loaded") {
+    if js::get_str(&s, "db") == db && (js::get_bool(&s, "loaded") || js::get_bool(&s, "loading")) {
         return;
     }
-    api::get("/api/meta", None, move |v| {
+    js::set_str(&s, "db", db);
+    js::set_bool(&s, "loading", true);
+    js::set_bool(&s, "loaded", false);
+    js::set_str(&s, "error", "");
+    js::set_str(&s, "ontology", db);
+    js::set_str(&s, "brain", db);
+    js::set_str(&s, "indexedAt", "");
+    for k in ["entities", "links", "vectors"] {
+        js::set_num(&s, k, 0.0);
+    }
+    js::set(&s, "classes", &js::new_array().into());
+    js::set(&s, "relations", &js::new_array().into());
+    let want = db.to_string();
+    api::get(&format!("/api/meta?db={}", encode(db)), None, move |v| {
         let s = mjs::store_ref("meta");
+        if js::get_str(&s, "db") != want {
+            return; // the reader has moved to another brain
+        }
+        js::set_bool(&s, "loading", false);
+        let err = js::get_str(&v, "error");
+        if !err.is_empty() {
+            js::set_str(&s, "error", &err);
+            mjs::redraw();
+            return;
+        }
         for k in ["ontology", "brain", "indexedAt"] {
             js::set_str(&s, k, &js::get_str(&v, k));
         }
@@ -97,6 +191,14 @@ pub fn load_meta() {
 }
 
 // ── navigation ──────────────────────────────────────────────────────────────
+
+fn scroll_top() {
+    js::call(
+        &js::global(),
+        "scrollTo",
+        &[JsValue::from_f64(0.0), JsValue::from_f64(0.0)],
+    );
+}
 
 fn nav() {
     let mut d = Def::new();
@@ -119,13 +221,58 @@ fn nav() {
                 return JsValue::UNDEFINED;
             }
             js::call(&ev, "preventDefault", &[]);
-            mjs::router_set(&href);
+            let label_target = js::call_string(
+                &anchor,
+                "getAttribute",
+                &[JsValue::from_str("data-entity-label")],
+            );
+            if label_target == "true" {
+                // Label-only wikilinks such as [[Payment Service]]
+                // resolve lazily through the existing entity endpoint. The
+                // pill is immediately visible/clickable, while the canonical
+                // Class/id route is selected only after the backend resolves
+                // the human label.
+                let entity_label = js::call_string(
+                    &anchor,
+                    "getAttribute",
+                    &[JsValue::from_str("data-entity")],
+                );
+                // Label-only wikilinks resolve against the brain on screen, not
+                // against whichever one the server happens to default to.
+                let db = js::get_str(&mjs::store_ref("meta"), "db");
+                let path = format!("/api/entity?db={}&slug={}", encode(&db), encode(&entity_label));
+                api::get(&path, None, move |v| {
+                    let canonical = js::get_str(&v, "slug");
+                    if canonical.contains('/') {
+                        mjs::router_set(&format!("/e/{canonical}"));
+                        scroll_top();
+                    }
+                });
+            } else {
+                mjs::router_set(&href);
+                scroll_top();
+            }
             JsValue::UNDEFINED
         })
         .method("home", |_this, args| {
             let ev = js::arg(&args, 0);
             js::call(&ev, "preventDefault", &[]);
-            mjs::router_set("/");
+            let db = js::get_str(&mjs::store_ref("meta"), "db");
+            mjs::router_set(&format!("/{db}"));
+            scroll_top();
+            JsValue::UNDEFINED
+        })
+        // Which brain the wiki is reading. The landing page is the right
+        // destination: an entity slug in one brain usually does not exist in the
+        // next (they are different graphs, not different views of one).
+        .method("switchDb", |_this, args| {
+            let ev = js::arg(&args, 0);
+            let db = js::get_str(&js::get(&ev, "target"), "value");
+            if db.is_empty() {
+                return JsValue::UNDEFINED;
+            }
+            mjs::router_set(&format!("/{db}"));
+            scroll_top();
             JsValue::UNDEFINED
         });
     mjs::store("nav", &d.finish());
@@ -144,14 +291,15 @@ fn page() {
     mjs::store("page", &d.finish());
 }
 
-pub fn load_entity(cls: &str, id: &str) {
+pub fn load_entity(db: &str, cls: &str, id: &str) {
     let s = mjs::store_ref("page");
     let slug = format!("{cls}/{id}");
     js::set_bool(&s, "loading", true);
     js::set_str(&s, "error", "");
     js::set_str(&s, "slug", &slug);
     js::set(&s, "listing", &JsValue::NULL);
-    api::get(&format!("/api/entity?slug={}", encode(&slug)), None, move |v| {
+    let path = format!("/api/entity?db={}&slug={}", encode(db), encode(&slug));
+    api::get(&path, None, move |v| {
         let s = mjs::store_ref("page");
         js::set_bool(&s, "loading", false);
         let err = js::get_str(&v, "error");
@@ -166,7 +314,7 @@ pub fn load_entity(cls: &str, id: &str) {
     });
 }
 
-pub fn load_class(cls: &str) {
+pub fn load_class(db: &str, cls: &str) {
     let s = mjs::store_ref("page");
     js::set_bool(&s, "loading", true);
     js::set_str(&s, "error", "");
@@ -174,7 +322,8 @@ pub fn load_class(cls: &str) {
     js::set(&s, "entity", &JsValue::NULL);
     let title = cls.to_string();
     let cls_q = cls.to_string();
-    api::get(&format!("/api/class?name={}", encode(&cls_q)), None, move |v| {
+    let path = format!("/api/class?db={}&name={}", encode(db), encode(&cls_q));
+    api::get(&path, None, move |v| {
         let s = mjs::store_ref("page");
         js::set_bool(&s, "loading", false);
         js::set(&s, "listing", &v);
@@ -188,7 +337,7 @@ pub fn load_class(cls: &str) {
 fn serp() {
     let mut d = Def::new();
     d.str("q", "")
-        .str("mode", "crawl")
+        .str("mode", "ontology")
         .bool("loading", false)
         .str("error", "")
         .val("crawl", &JsValue::NULL)
@@ -243,11 +392,12 @@ fn serp() {
                 return JsValue::UNDEFINED;
             }
             let mode = js::get_str(&s, "mode");
+            let db = js::get_str(&mjs::store_ref("meta"), "db");
             // m-js's Router matches on the PATHNAME and drops a query string,
             // so the search state rides in the path. `encodeURIComponent`
             // escapes `/`, so a question with a slash in it is still one
             // segment.
-            mjs::router_set(&format!("/search/{}/{mode}", encode(&q)));
+            mjs::router_set(&format!("/{db}/search/{}/{mode}", encode(&q)));
             JsValue::UNDEFINED
         })
         .method("rerun", |_this, args| {
@@ -257,7 +407,8 @@ fn serp() {
             if q.trim().is_empty() {
                 return JsValue::UNDEFINED;
             }
-            mjs::router_set(&format!("/search/{}/{mode}", encode(&q)));
+            let db = js::get_str(&mjs::store_ref("meta"), "db");
+            mjs::router_set(&format!("/{db}/search/{}/{mode}", encode(&q)));
             JsValue::UNDEFINED
         });
     mjs::store("serp", &d.finish());
@@ -266,7 +417,7 @@ fn serp() {
 /// Run the query named in the address bar. The URL is the state: a pasted link,
 /// an edited query string and a Back press all land here and all produce the
 /// same page.
-pub fn run_query(q: &str, mode: &str) {
+pub fn run_query(db: &str, q: &str, mode: &str) {
     let s = mjs::store_ref("serp");
     let id = NEXT_REQ.fetch_add(1, Ordering::Relaxed);
 
@@ -300,7 +451,7 @@ pub fn run_query(q: &str, mode: &str) {
     // thinks -- and a user who can see the candidates can judge the answer the
     // moment it lands.
     {
-        let path = format!("/api/query?q={}&mode=search", encode(q));
+        let path = format!("/api/query?db={}&q={}&mode=search", encode(db), encode(q));
         api::get(&path, None, move |v| {
             if stale(id) {
                 return;
@@ -315,9 +466,9 @@ pub fn run_query(q: &str, mode: &str) {
     }
 
     if mode == "crawl" {
-        stream_crawl(q, id);
+        stream_crawl(db, q, id);
     } else {
-        let path = format!("/api/query?q={}&mode={}", encode(q), encode(mode));
+        let path = format!("/api/query?db={}&q={}&mode={}", encode(db), encode(q), encode(mode));
         api::get(&path, None, move |v| apply_answer(id, v));
     }
 }
@@ -371,28 +522,27 @@ fn apply_answer(id: u32, v: JsValue) {
 /// stream is unavailable or breaks: the final `result` event is byte-identical to
 /// what `/api/query` returns, so losing the progress feed never has to lose the
 /// answer.
-fn stream_crawl(q: &str, id: u32) {
-    let json_only = |q: String, id: u32| {
-        let path = format!("/api/query?q={}&mode=crawl", encode(&q));
-        api::get(&path, None, move |v| apply_answer(id, v));
-    };
-
+fn stream_crawl(db: &str, q: &str, id: u32) {
     let ctor = js::get(&js::global(), "EventSource");
     if js::is_missing(&ctor) || ctor.is_null() {
-        json_only(q.to_string(), id);
+        ask_json(db, q, id);
         return;
     }
     let args = js::new_array();
-    js::call(&args, "push", &[JsValue::from_str(&format!("/api/stream?q={}", encode(q)))]);
+    js::call(
+        &args,
+        "push",
+        &[JsValue::from_str(&format!("/api/stream?db={}&q={}", encode(db), encode(q)))],
+    );
     // `Reflect::construct` is typed on a callable, so the constructor has to be
     // narrowed to a Function first -- and if `EventSource` is somehow not a
     // function on this host, that is a reason to take the JSON path, not a panic.
     let Ok(ctor_fn) = ctor.dyn_into::<js_sys::Function>() else {
-        json_only(q.to_string(), id);
+        ask_json(db, q, id);
         return;
     };
     let Ok(source) = js_sys::Reflect::construct(&ctor_fn, &args) else {
-        json_only(q.to_string(), id);
+        ask_json(db, q, id);
         return;
     };
 
@@ -409,11 +559,12 @@ fn stream_crawl(q: &str, id: u32) {
         mjs::redraw();
     }) as Box<dyn FnMut(JsValue)>);
 
+    let db_for_result = db.to_string();
     let q_for_result = q.to_string();
     let on_result = Closure::wrap(Box::new(move |ev: JsValue| {
         let data = js::get_str(&ev, "data");
         let Ok(v) = js_sys::JSON::parse(&data) else {
-            json_only(q_for_result.clone(), id);
+            ask_json(&db_for_result, &q_for_result, id);
             return;
         };
         // Close BEFORE applying: the server ends the stream after its final event,
@@ -427,6 +578,8 @@ fn stream_crawl(q: &str, id: u32) {
         apply_answer(id, v);
     }) as Box<dyn FnMut(JsValue)>);
 
+    let db_for_error = db.to_string();
+    let q_for_error = q.to_string();
     let on_error = Closure::wrap(Box::new(move |_ev: JsValue| {
         // EventSource fires `error` for a dropped connection and then retries on
         // its own. We do not want that here: a retry re-runs a crawl, and a crawl
@@ -436,21 +589,12 @@ fn stream_crawl(q: &str, id: u32) {
                 js::call(&live.source, "close", &[]);
             }
         });
-        // Report it; do not silently re-queue. The old behaviour was to fire the
-        // plain JSON crawl here, which meant one stalled search became two --
-        // both queued behind the same stuck gate -- and the user saw a spinner
-        // forever with no explanation. The stream ceiling is now shorter than the
-        // search ceiling, so reaching this handler genuinely means the answer is
-        // not coming: the honest thing is to say so and let the reader decide.
+        // The current brain server may not expose /api/stream (for example,
+        // older/dev servers register /api/query but not the SSE route). The
+        // crawl itself is still available as a normal JSON response, so fall
+        // back once instead of presenting a misleading stream error.
         if !stale(id) {
-            let s = mjs::store_ref("serp");
-            js::set_bool(&s, "loading", false);
-            js::set_str(
-                &s,
-                "error",
-                "the search stream ended before an answer arrived — try again",
-            );
-            mjs::redraw();
+            ask_json(&db_for_error, &q_for_error, id);
         }
     }) as Box<dyn FnMut(JsValue)>);
 
@@ -461,6 +605,14 @@ fn stream_crawl(q: &str, id: u32) {
     STREAM.with(|c| {
         *c.borrow_mut() = Some(Live { source, _step: on_step, _result: on_result, _error: on_error })
     });
+}
+
+/// The crawl as a plain JSON request — the path taken when the stream is
+/// unavailable, and the fallback when it breaks. Identical payload, so losing
+/// the progress feed never has to lose the answer.
+fn ask_json(db: &str, q: &str, id: u32) {
+    let path = format!("/api/query?db={}&q={}&mode=crawl", encode(db), encode(q));
+    api::get(&path, None, move |v| apply_answer(id, v));
 }
 
 /// The elapsed clock. Mounted once per boot; it does nothing while a search is

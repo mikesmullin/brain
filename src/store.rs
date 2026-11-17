@@ -701,6 +701,44 @@ CREATE TABLE IF NOT EXISTS {s}.meta (
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
     }
 
+    /// Class listing for the wiki index: full rows, so a listing can say what
+    /// each entity is instead of only naming it.
+    ///
+    /// Separate from [`Store::list_class`] rather than a wider return there: the
+    /// nine other callers — the crawl's menus, the indexer's chunk walker, the
+    /// CLI's `ls` — never read prose or components, and this query carries both.
+    pub async fn list_class_rows(
+        &self,
+        cls: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EntityRow>> {
+        let c = self.client().await?;
+        let s = self.s();
+        let rows = match cls {
+            Some(cl) => {
+                c.query(
+                    &format!(
+                        "SELECT slug,cls,id,label,components,body FROM {s}.entities WHERE lower(cls) = lower($1)
+                          ORDER BY id LIMIT $2 OFFSET $3"
+                    ),
+                    &[&cl, &limit, &offset],
+                )
+                .await?
+            }
+            None => {
+                c.query(
+                    &format!(
+                        "SELECT slug,cls,id,label,components,body FROM {s}.entities ORDER BY cls, id LIMIT $1 OFFSET $2"
+                    ),
+                    &[&limit, &offset],
+                )
+                .await?
+            }
+        };
+        Ok(rows.into_iter().map(row_to_entity).collect())
+    }
+
     pub async fn out_edges(&self, slug: &str) -> Result<Vec<LinkRow>> {
         let c = self.client().await?;
         let s = self.s();
@@ -1131,7 +1169,7 @@ fn components_json(e: &Entity) -> String {
 }
 
 /// Query tokenizer: lowercase alphanumeric runs, stopwords and 1–2 char tokens
-/// dropped. Short tokens are dropped because brain-db has a `Team/sre`, and a
+/// dropped. Short tokens are dropped because a dataset can have a one-token slug
 /// 3-char id is a real thing to search for while "of" is not.
 pub fn tokenize(q: &str) -> Vec<String> {
     const STOP: &[&str] = &[

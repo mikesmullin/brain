@@ -10,12 +10,15 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🧠</text></svg>" />
     <!-- the rustex1 kit skin, then this app's own type and colour -->
     <link rel="stylesheet" href="/kit.css" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=1794941894" />
   </head>
   <body>
     <!-- m-js owns everything inside #app; the wasm owns m-js -->
     <div id="app"></div>
 
     <script type="module" data-hmr-entry src="/app.mjs"></script>
+    <!-- the citation inspector (press E). Independent of the app: it measures
+         the rendered DOM, so it is plain JS and needs no wasm rebuild. -->
+    <script type="module" src="/cite.js?v=1794941894"></script>
   </body>
 </html>

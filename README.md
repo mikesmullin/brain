@@ -62,6 +62,53 @@ fused with RRF), `think` (retrieve, then synthesise with citations and gaps),
 `ontology` (an agent walking typed edges through deterministic tools), `graph`
 (Mermaid-ish pattern match), `graphql` (projection from a known root).
 
+### Where a corpus comes from
+
+A corpus is a **repository**, not image content. `corpora.yaml` names the
+repositories to serve; the container shallow-clones them at boot, and
+`POST /api/corpus/refresh` pulls the same file again on demand:
+
+```yaml
+default: alpha
+corpora:
+  alpha: { repo: git@git.example.com:alpha/coord.git, ref: main, subdir: .brain }
+  beta:  { repo: git@git.example.com:beta/coord.git,  ref: main, subdir: .brain }
+  gamma: { repo: git@git.example.com:gamma/coord.git, ref: main, subdir: .brain }
+```
+
+```sh
+brain corpus list                       # what is configured, and which SHA each is at
+brain corpus pull                       # clone/refresh, then reindex what moved
+brain corpus pull --alias alpha --json  # one corpus, machine-readable
+```
+
+`subdir: .brain` is the fact the old single-repo clone could not express: a
+coordination repo holds its brain in a subdirectory, while a repo that *is* a
+brain has `db/` at its root. Both work; the file says which.
+
+`pull` is shallow (`--depth 1`), so a refresh costs one fetch of the delta rather
+than a re-clone, and it **skips the reindex when the SHA did not move**. A corpus
+that cannot be cloned is an error (a wiki with no pages that answers 200 is worse
+than one that says why); a corpus that cannot be refreshed keeps serving the
+checkout on disk and reports `stale`, because stale service beats no service.
+
+Refresh a running server without a restart:
+
+```sh
+curl -X POST -H "Authorization: Bearer $BRAIN_WEBHOOK_SECRET" \
+     https://brain.example.com/api/corpus/refresh
+```
+
+It answers with the per-corpus report (old SHA → new SHA, whether it reindexed),
+and `GET /api/brains` carries `repo`/`ref`/`sha`/`indexedAt` per database — so
+"which corpus is serving me?" is a question with an answer. Unauthenticated
+triggers are refused: without `BRAIN_WEBHOOK_SECRET` the route returns `403`
+rather than exposing a `git fetch` + `TRUNCATE` to whoever can reach the port.
+A second concurrent refresh gets `409`.
+
+PostgreSQL is **derived and disposable** here: a refresh truncates and rebuilds
+the index from the `.md` files, and nothing needs preserving between pulls.
+
 ## The T-box has axioms now
 
 `schema.yaml` keeps v1's shape and adds the OWL vocabulary:
@@ -111,6 +158,56 @@ a table called `entities`.
 ```
 
 One page per entity, its relations as links, and a search bar that runs `crawl`.
+
+### One server, many brains
+
+The wiki is not limited to one database. A process serves every brain it can
+find, the selector beside the wordmark switches between them, and **the URL says
+which one a page is about**:
+
+```
+/alpha/e/Person/jdoe            # one brain's entity
+/beta/                          # another brain's home page
+/beta/search/service%20ownership/search
+```
+
+`/` redirects to the default brain, so a pasted host still lands somewhere real,
+and a link to an entity carries its database with it — a shared URL opens the
+graph it names rather than whatever the reader last selected.
+
+The set served is: a `--corpora <file>` if one is named (which replaces the
+registry below, because the file is also what a refresh pulls), then the brain
+`--db`/`--use` resolves to as the default, then every
+`--brain <alias>=<path>`, then everything in `~/.config/brain/brains.yaml`. A
+container with no registry and one corpus serves exactly one brain, which is what
+production wants.
+
+```sh
+brain --db ~/work/alpha/coord/.brain web \
+      --brain beta=~/work/beta/coord/.brain \
+      --brain gamma=~/work/gamma/coord/.brain
+```
+
+Every brain indexes into **its own PostgreSQL schema**, so they cannot collide
+even when all of them have a table called `entities`:
+
+```sh
+brain pg status     # container, server version, size per schema
+```
+
+Two things make sibling brains work in practice, both of them in `brain.yaml`:
+
+```yaml
+alias: alpha          # what the selector shows and the URL segment says
+pg:
+  schema: brain_alpha # this brain's index; defaults to the alias, sanitized
+```
+
+They are needed because of the one layout that keeps coming up: a coordination
+repo keeps its brain in `.brain/`, so *every* coord repo — alpha, beta, gamma —
+would otherwise be called "brain" and share one schema. A brain that names itself
+can sit beside its siblings.
+
 The frontend is Rust compiled to wasm, rendering through [m-js] on the
 [`rustex1`](vendor/rustex1) kit — there is no JavaScript here except the kit's
 two bridge files. Saving `app/**.rs` hot-swaps the wasm in 398 ms with no page reload; saving
@@ -149,7 +246,7 @@ brain --db /data/panama bench panama
 ## Layout
 
 ```
-brain.yaml               per-db config, sibling of db/
+brain.yaml               per-db config, sibling of db/ (alias, endpoints, pg schema)
 db/
   <Class>/<id>.md        entities — the A-box (git-tracked)
   schema.yaml            the T-box (git-tracked)

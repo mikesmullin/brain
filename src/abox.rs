@@ -430,6 +430,73 @@ pub fn pretty_slug(id: &str) -> String {
     id.replace('_', " ")
 }
 
+/// The opening of a note as a one-line summary — what a listing row shows
+/// under the entity's badge.
+///
+/// Prose first: the note's own first paragraph, with its `# Class/id` title and
+/// any heading skipped (the badge already names the entity) and fences skipped
+/// too, because a fragment of code describes nothing. `[[Class/id|Label]]` is
+/// kept verbatim — the renderer turns it into a badge, so keeping it keeps a
+/// link.
+///
+/// A note with no prose still has a `description` field more often than not
+/// (that is what `Naming`/`SystemInfo` are for), so that is the fallback. An
+/// entity with neither shows its badge alone rather than a row of
+/// `alias.field: value` noise.
+pub fn summary(e: &Entity, budget: usize) -> String {
+    let prose = opening_paragraph(&e.body, budget);
+    if !prose.is_empty() {
+        return prose;
+    }
+    for fields in e.components.values() {
+        if let Some(Value::String(desc)) = fields.get("description") {
+            let desc = squash(desc);
+            if !desc.is_empty() {
+                return clip(&desc, budget);
+            }
+        }
+    }
+    String::new()
+}
+
+/// Lines up to the first blank one, minus headings and fences.
+fn opening_paragraph(body: &str, budget: usize) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with("```") {
+            // A blank line after prose ends the paragraph; before it, this is
+            // just the spacing between the title and the note.
+            if !out.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(t);
+        if out.chars().count() >= budget {
+            break;
+        }
+    }
+    clip(&out, budget)
+}
+
+/// One line from a possibly multi-line field value.
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Cut to `budget` characters, marking the cut.
+fn clip(s: &str, budget: usize) -> String {
+    let mut out: String = s.chars().take(budget).collect();
+    if s.chars().count() > budget {
+        out.push('…');
+    }
+    out
+}
+
 /// A flat human-readable rendering of one entity's own fields, used by the
 /// crawl's state payload and by the wiki page renderer.
 pub fn render_fields(e: &Entity, limit_chars: usize) -> String {
@@ -504,4 +571,52 @@ pub fn read_entity(cls: &str, id: &str, path: &Path) -> Result<Entity> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     Entity::from_markdown(cls, id, &text).with_context(|| format!("in {}", path.display()))
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    fn ent(body: &str, description: Option<&str>) -> Entity {
+        let mut e = Entity::new("System".to_string(), "x".to_string());
+        e.body = body.to_string();
+        if let Some(d) = description {
+            let mut fields = serde_json::Map::new();
+            fields.insert("description".to_string(), Value::String(d.to_string()));
+            e.components.insert("info".to_string(), fields);
+        }
+        e
+    }
+
+    #[test]
+    fn prose_wins_over_the_description_field() {
+        let e = ent("\n# System/x\n\nGuardian is the ops plane.\n\nA second paragraph.\n", Some("field"));
+        assert_eq!(summary(&e, 220), "Guardian is the ops plane.");
+    }
+
+    #[test]
+    fn a_note_with_no_prose_falls_back_to_description() {
+        let e = ent("\n# Cloud/alibaba\n", Some("Our only public cloud provider\nin China"));
+        assert_eq!(summary(&e, 220), "Our only public cloud provider in China");
+    }
+
+    #[test]
+    fn nothing_to_say_is_empty_not_noise() {
+        let e = ent("# System/x\n", None);
+        assert_eq!(summary(&e, 220), "");
+    }
+
+    #[test]
+    fn long_text_is_clipped_and_marked() {
+        let body = format!("# System/x\n\n{}\n", "word ".repeat(80));
+        let s = summary(&ent(&body, None), 20);
+        assert!(s.ends_with('…'), "{s}");
+        assert_eq!(s.chars().count(), 21, "{s}");
+    }
+
+    #[test]
+    fn wikilinks_survive_for_the_renderer() {
+        let e = ent("See [[Item/mandrake|Mandrake]] for the recipe.\n", None);
+        assert_eq!(summary(&e, 220), "See [[Item/mandrake|Mandrake]] for the recipe.");
+    }
 }

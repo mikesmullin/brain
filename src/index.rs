@@ -367,6 +367,25 @@ pub fn validate(brain: &Brain, tbox: &TBox) -> Result<Vec<Finding>> {
             };
             let slug = e.slug();
             let declared = tbox.class_fields(cls);
+            // A class that declares components and an entity that has none is
+            // not a sparse entity, it is a file whose frontmatter did not parse:
+            // the leading `---` was not on its own line (a corpus written with
+            // literal backslash-n text), so the whole document became body prose.
+            // It indexes, it counts, and every field reads empty — the one defect
+            // that looks like a healthy pod from the outside, which is exactly why
+            // it is an error here rather than a notice.
+            if !declared.is_empty() && e.components.is_empty() {
+                out.push(Finding {
+                    severity: Severity::Error,
+                    subject: slug.clone(),
+                    rule: "no_components",
+                    detail: format!(
+                        "{cls} declares {} but this entity has none — did the frontmatter parse? (the leading `---` must be on its own line)",
+                        declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                });
+                return out;
+            }
             for (alias, fields) in &e.components {
                 let Some((comp, defs)) = declared.get(alias) else {
                     out.push(Finding {

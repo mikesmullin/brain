@@ -9,12 +9,13 @@
 //! What the UI is, and is not: v1 put two million entities on screen as a WebGL
 //! point cloud and an agent in a sidebar. Both are gone. This is a wiki — one
 //! page per entity, set for reading a paragraph — with a search bar that runs
-//! `crawl` by default, because `crawl` is the only mode that takes a sentence
+//! `ontology` by default, because it is the natural-language graph mode
 //! and still cannot name a node that does not exist.
 
 use rustex1_kit::{self as kit, App, Runtime};
 use wasm_bindgen::prelude::*;
 
+mod md;
 mod pages;
 mod store;
 
@@ -36,9 +37,10 @@ impl App for Brain {
     }
 
     fn started(&self, _rt: &mut Runtime) {
-        // The schema and the counts are fetched once and kept: they change only
-        // when someone reindexes, and every page's sidebar reads them.
-        store::load_meta();
+        // Which brains exist comes first: the selector reads it, and a boot at
+        // `/` needs it to know where to land. Each page then loads the schema
+        // and counts for the brain its own URL names.
+        store::load_dbs();
         // One clock loop for the life of the instance. It is inert whenever no
         // search is in flight, so paying for it on the home page costs nothing.
         store::start_clock();

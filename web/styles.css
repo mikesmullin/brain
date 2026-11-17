@@ -29,6 +29,33 @@
 
 * { box-sizing: border-box; }
 
+/* Apple-style dark scrollbars everywhere: thin, rounded, quiet until hovered. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3442 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  background: #2a3442;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3a4b60;
+  border-width: 1px;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {
@@ -59,7 +86,36 @@ header.bar {
   color: var(--ink); white-space: nowrap;
 }
 .brand .glyph { font-size: 19px; }
-.brand .onto { color: var(--ink-faint); font-weight: 400; font-size: 13px; }
+
+/* The brain selector: which knowledge graph this page reads. It sits beside the
+   wordmark rather than inside it — `.brand` is an anchor, and a <select> nested
+   in an <a> is a click trap. Native on purpose (it is the one control every
+   browser and screen reader already knows); the chevron is drawn here so it
+   matches the search bar's controls instead of the platform's. */
+header.bar select.db {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 18ch;
+  padding: 4px 22px 4px 9px;
+  appearance: none; -webkit-appearance: none;
+  background-color: var(--bg-raised);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238e9bb0' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='m4 6.5 4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font: 600 12.5px/1.5 var(--sans);
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+header.bar select.db:hover { border-color: var(--accent-dim); color: var(--ink); }
+header.bar select.db:focus-visible {
+  outline: none;
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 12%, transparent);
+}
 
 form.search { display: flex; flex: 1; gap: 8px; min-width: 0; }
 form.search input {
@@ -115,6 +171,25 @@ aside .box {
 aside ul { margin: 0; padding: 0; list-style: none; }
 aside li { display: flex; justify-content: space-between; gap: 10px; padding: 2.5px 0; }
 aside li .n { color: var(--ink-faint); font: 400 12.5px/1.6 var(--mono); }
+aside li a { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+aside li a .class-icon { flex: 0 0 auto; font-size: 0.95em; opacity: 0.9; }
+
+/* The graph's size: a readout, not a card. No background, no border, no
+   padding — just one line of small caps-and-mono numbers sitting above the
+   class list, so the eye reads it as a caption for the column rather than as
+   another thing to navigate. */
+aside .stats-line {
+  display: flex; flex-wrap: nowrap; align-items: baseline; gap: 5px;
+  margin: 0 0 15px; padding: 0;
+  font: 400 12.5px/1.6 var(--mono); color: var(--ink-faint); white-space: nowrap;
+}
+aside .stats-line .metric { display: inline-flex; align-items: baseline; gap: 4px; }
+aside .stats-line .metric .k {
+  font: 600 10.5px/1.6 var(--sans); letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+aside .stats-line .metric .v { color: var(--ink-dim); }
+aside .stats-line .sep { color: var(--ink-faint); opacity: 0.6; }
 
 /* ── reading page ────────────────────────────────────────────────────────── */
 
@@ -142,6 +217,54 @@ h2 {
 .prose { font-family: var(--serif); font-size: 17.5px; line-height: 1.72; }
 .prose p { margin: 0 0 1.05em; }
 
+/* Note bodies are Markdown (headings, lists, code, **bold**, *italic*,
+ * links) rendered by app/src/md.rs. The global h2 rule gives `##` sections
+ * the same restrained label style as the Relations headers; `h3` fills the
+ * missing rung. */
+.prose h3 {
+    margin: 2.4em 0 10px;
+    font: 600 14px/1 var(--sans);
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim);
+    border-bottom: 1px solid var(--line-soft);
+    padding-bottom: 5px;
+}
+.prose ul,
+.prose ol {
+    margin: 0.1em 0 1.1em;
+    padding-left: 1.3em;
+}
+.prose li {
+    margin-bottom: 0.4em;
+}
+.prose ul ul,
+.prose ol ol {
+    margin-top: 0.35em;
+}
+.prose code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    padding: 0.5px 5px;
+    border-radius: 5px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--line-soft);
+    overflow-wrap: break-all;
+}
+.prose pre > code {
+    /* the global pre rule styles code blocks; neutralize the inline style */
+    font-size: 100%;
+    color: inherit;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    overflow-wrap: normal;
+}
+.prose blockquote {
+    margin: 0.5em 0 1.05em;
+    padding: 0 0 0 14px;
+    border-left: 2px solid var(--accent-dim);
+    color: var(--ink-dim);
+}
+
 dl.fields { margin: 0; display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 7px 20px; }
 dl.fields dt {
   font: 400 13px/1.5 var(--mono); color: var(--ink-faint);
@@ -149,6 +272,26 @@ dl.fields dt {
 }
 dl.fields dd { margin: 0; overflow-wrap: anywhere; }
 dl.fields dd.long { font-family: var(--serif); font-size: 16.5px; line-height: 1.6; }
+.field-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 4px;
+}
+.field-list li {
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+.field-list a,
+dl.fields dd a {
+  color: var(--accent);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.field-list a:hover,
+dl.fields dd a:hover {
+  text-decoration: underline;
+}
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip {
   padding: 1.5px 8px; border-radius: 99px;
@@ -156,13 +299,72 @@ dl.fields dd.long { font-family: var(--serif); font-size: 16.5px; line-height: 1
   font: 400 12.5px/1.6 var(--sans); color: var(--ink-dim);
 }
 
+/* Entity references inside note prose: {{Class/id}} or {{Class/id|Label}}.
+   The cube marks a concrete graph entity; the pill remains an ordinary anchor
+   so the existing delegated SPA navigation handles it without extra JS. */
+.entity-pill {
+  display: inline-flex; align-items: center; gap: 0.3em;
+  max-width: 14em;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in oklab, var(--accent) 42%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 9%, var(--bg-sunken));
+  color: var(--accent);
+  font: 400 0.86em/1.55 var(--mono);
+  vertical-align: baseline;
+  margin-inline: 1px;
+  text-decoration: none;
+}
+.entity-pill:hover {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, var(--bg-sunken));
+  color: var(--accent);
+  text-decoration: none;
+}
+.entity-pill-icon {
+  flex: 0 0 auto;
+  font-size: 0.95em;
+  color: currentColor;
+  opacity: 0.9;
+}
+.entity-pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rel { margin-bottom: 15px; }
+.rel-head {
+  display: flex; align-items: center; gap: 6px;
+}
+.rel-dir {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--accent);
+}
+.rel-dir.in { color: var(--warm); }
 .rel .name {
   font: 500 12.5px/1.6 var(--mono); color: var(--warm);
 }
-.rel .name.in { color: var(--ink-faint); }
-.rel ul { margin: 4px 0 0; padding: 0 0 0 1px; list-style: none; }
-.rel li { padding: 1.5px 0; }
+.rel .name.in { color: var(--warm); }
+.rel ul {
+  margin: 6px 0 0;
+  display: grid;
+  /* Responsive columns: as many equal-width columns as fit, filled left→right. */
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  column-gap: 16px;
+  row-gap: 5px;
+  list-style: none;
+  padding: 0;
+}
+.rel li {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+  padding: 0 0 0 2px;
+}
+.rel .relation-pill {
+  max-width: 100%;
+}
 .rel .qual { color: var(--ink-faint); font: 400 12px/1.6 var(--mono); }
 
 /* ── SERP ────────────────────────────────────────────────────────────────── */
@@ -181,10 +383,25 @@ dl.fields dd.long { font-family: var(--serif); font-size: 16.5px; line-height: 1
 .answer .cites { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
 .answer .meta { margin-top: 11px; font: 400 12px/1.5 var(--mono); color: var(--ink-faint); }
 
-.hit { padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
-.hit .path { font: 400 12px/1.5 var(--mono); color: var(--ink-faint); }
+/* One row of a list of entities: badge, then the note's opening prose. A search
+   result and a class listing are the same shape — a label you can read and a
+   sentence that says what it is — so they share these rules.
+
+   The class is `entity-row`, not `row`: the kit skin styles `.row` as a flex
+   row with a top margin (kit.css:136), which would lay the badge and the
+   summary side by side. A name the kit does not claim keeps that decision ours. */
+.hit,
+.entity-row { padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
+/* The badge is the row's whole identity now: entity label at heading weight,
+   slug in the hover tooltip. No path line above it. */
+.hit .entity-badge, .entity-row .entity-badge {
+  font: 500 16.5px/1.4 var(--sans);
+  padding: 2px 10px 2px 8px;
+  max-width: none;
+  margin: 2px 0 5px;
+}
 .hit .title { font: 500 18px/1.3 var(--sans); margin: 1px 0 3px; }
-.hit .snippet { color: var(--ink-dim); font-size: 14.5px; line-height: 1.55; }
+.hit .snippet, .entity-row .snippet { color: var(--ink-dim); font-size: 14.5px; line-height: 1.55; }
 .hit .via { color: var(--ink-faint); font: 400 11.5px/1.5 var(--mono); }
 
 pre {
@@ -193,6 +410,50 @@ pre {
   border-radius: var(--radius);
   font: 400 13px/1.6 var(--mono); color: var(--ink-dim);
 }
+
+/* ── the Source box: raw file contents in a native details/summary ─────── */
+/* Collapsed by default; the <summary> is the toggle row. */
+details.source {
+  margin: 34px 0 0;
+  max-width: var(--measure);
+}
+details.source > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 0 6px 0; margin: 0; cursor: pointer;
+  list-style: none;
+  -webkit-user-select: none; user-select: none;
+  font: 600 13px/1 var(--sans);
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-dim);
+  border-bottom: 1px solid transparent;
+}
+details.source[open] > summary {
+  border-bottom-color: var(--line-soft);
+}
+/* The native disclosure arrow is hidden — two Phosphor chevron SVGs take its
+   place, one per toggle state. */
+details.source > summary::-webkit-details-marker { display: none; }
+details.source > summary::-moz-details-marker { content: none; }
+
+/* Both chevrons share one 14px box immediately after the label; currentColor
+   inherits the summary ink, warming to ink-dim on hover / when the panel is open. */
+details.source > summary svg.cvn-down,
+details.source > summary svg.cvn-up {
+  width: 14px; height: 14px;
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  transition: color 120ms ease;
+}
+details.source > summary:hover svg,
+details.source[open] > summary svg {
+  color: var(--ink-dim);
+}
+
+/* Exactly one chevron is painted: collapsed -> down (fold), expanded -> up. */
+details.source > summary svg.cvn-up { display: none; }
+details.source[open] > summary svg.cvn-down { display: none; }
+details.source[open] > summary svg.cvn-up { display: block; }
+
+details.source > pre { margin-top: 8px; }
 
 .empty { padding: 40px 0; color: var(--ink-faint); text-align: center; }
 .spinner { padding: 40px 0; color: var(--ink-faint); text-align: center; font: 400 14px/1 var(--mono); }
@@ -221,3 +482,108 @@ pre {
 /* ── the kit's dev panel sits on top of all this; keep it out of the way ──── */
 body { background: var(--bg) !important; color: var(--ink); }
 #app { min-height: 100vh; }
+
+/* ── citation inspector ───────────────────────────────────────────────────
+   Styles for web/cite.js. Everything here is inert until that script arms,
+   except .hilite, which is the durable mark a citation leaves behind: the
+   agent reads it straight off the DOM, so it has to be real CSS and not
+   something the inspector applies inline. */
+
+/* The crosshair belongs to us while armed, so the pointer does not compete
+   with the highlighter glyph. */
+html.cite-armed,
+html.cite-armed * { cursor: none !important; }
+
+html.cite-armed ::selection { background: transparent; }
+
+.cite-icon {
+  position: fixed; left: 0; top: 0; z-index: 2147483000;
+  pointer-events: none; opacity: 0;
+  transition: opacity .08s linear;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,.6));
+}
+.cite-icon.show { opacity: 1; }
+
+.cite-panel {
+  position: fixed; left: 0; top: 0; z-index: 2147483001;
+  display: none; width: min(460px, calc(100vw - 28px));
+  background: rgba(10,13,18,.94);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 12px 34px rgba(0,0,0,.55);
+  color: var(--ink); font: 400 12px/1.5 var(--sans);
+}
+.cite-panel.show { display: block; }
+
+.cite-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
+  font: 600 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.cite-count { color: var(--warm); font-weight: 700; }
+
+.cite-dl { margin: 0; padding: 8px 10px 4px; display: grid; gap: 5px; }
+.cite-dl > div { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 10px; align-items: baseline; }
+.cite-dl dt {
+  margin: 0; font: 500 10px/1.5 var(--mono); letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.cite-dl dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; user-select: text; }
+.cite-dl .f-url { color: var(--accent); }
+.cite-dl .f-xpath, .cite-dl .f-tag { color: var(--ink-dim); }
+.cite-dl .f-href { color: var(--accent-dim); font-size: 11px; }
+.cite-dl .f-text { font-family: var(--sans); color: var(--ink); max-height: 7.5em; overflow: hidden; }
+
+.cite-hint {
+  padding: 6px 10px 8px; border-top: 1px solid var(--line-soft);
+  color: var(--ink-faint); font: 400 10.5px/1.4 var(--mono);
+}
+
+/* Hover candidate and the lasso itself. Scoped to body.citing so a stale
+   outline can never survive a disarm and masquerade as a selection. */
+body.citing .cite-target {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 1px;
+  background-color: rgba(124,196,255,.07) !important;
+}
+
+.cite-lasso {
+  position: fixed; z-index: 2147483002; display: none; pointer-events: none;
+  border: 1px dashed var(--accent);
+  background: rgba(124,196,255,.10);
+}
+.cite-lasso.show { display: block; }
+
+/* The citation handle, painted only while the inspector is armed (body.citing).
+   The .hilite *class* is the selection and lives on the DOM; this rule is just
+   its visibility, so disarming E hides a selection without destroying it -- the
+   agent can still read document.querySelectorAll('.hilite'), and re-arming
+   brings the marks back. Bright but translucent: at 30% the mark reads as paint
+   laid over the page rather than paint replacing it, so the text keeps its own
+   colour and a code span still looks like a code span underneath. The ring --
+   not the fill -- is what makes the boundary unambiguous. */
+body.citing .hilite {
+  background-color: rgba(245, 197, 24, .30) !important;
+  border-radius: 3px;
+  box-shadow: 0 0 0 2px rgba(245, 197, 24, .60);
+  /* Citations often land on inline <code>/<a> runs that wrap across lines, and
+     without this a ring is drawn only at the very start and end of the run. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.cite-toast {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2147483003;
+  display: none; padding: 8px 12px;
+  background: rgba(10,13,18,.94); border: 1px solid var(--line);
+  border-radius: 99px; color: var(--good);
+  font: 500 11.5px/1.4 var(--mono);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.cite-toast.show { display: block; }
+
+.cite-fallback {
+  position: fixed; left: -9999px; top: 0; opacity: 0;
+  width: 1px; height: 1px;
+}

@@ -1,7 +1,7 @@
 //! serve.rs — `brain serve`: the production HTTP surface for the wiki.
 //!
-//! `brain web` and `brain serve` render the same page and answer the same four
-//! JSON routes. Everything *around* them differs, and the differences are the
+//! `brain web` and `brain serve` render the same page and answer the same JSON
+//! routes (`/api/brains` plus the four data routes). Everything *around* them differs, and the differences are the
 //! reason this file exists:
 //!
 //! |                     | `brain web` (rustex1 devserver)              | `brain serve` (this)                  |
@@ -73,9 +73,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
+use crate::brains;
 use crate::cli::Global;
 use crate::commands::Ctx;
-use crate::web::{handle, Owned, Route};
+use crate::web::{handle, Multi, Owned, Provenance, Route};
 
 /// Defaults chosen for the container, not for a desk: a production port, and
 /// loopback still the default bind so an unauthenticated wiki never becomes
@@ -106,18 +107,6 @@ const STORE_OPEN_TIMEOUT: Duration = Duration::from_secs(180);
 /// Drain budget on SIGTERM. Envoy's default upstream drain is longer than this,
 /// so in-flight requests finish before the cluster tears the listener down.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Ceiling on one `/api/stream` response. The walk inside it is already bounded
-/// by [`crawl::CRAWL_DEADLINE_MS`], but the payload also runs a search and may run
-/// an ontology fallback after that budget is spent, and this task holds a socket
-/// plus an `in_flight` slot while it does -- so the stream gets its own backstop
-/// rather than inheriting whatever the slowest leg happens to take.
-/// Ceiling on one `/api/stream` response: the search ceiling plus enough slack to
-/// deliver a final `result` or `error` event, so a client is never left holding an
-/// open stream that has already been abandoned upstream. It used to be a 45 s
-/// guess, which meant the browser waited 45 s to learn that the walk was gone --
-/// and then re-queued a second crawl behind it.
-const STREAM_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub struct Args {
     pub host: IpAddr,
@@ -154,15 +143,39 @@ impl Default for Args {
 struct Server {
     args: Args,
     /// Empty until the background opener lands; then `Some` forever after.
-    ctx: RwLock<Option<Arc<Ctx>>>,
+    ///
+    /// A *set* of brains, not one: every API route names its database with a
+    /// `db=` parameter, and each brain owns its own PostgreSQL schema. The set
+    /// itself is built once (the registry does not change while the process is
+    /// up), so it is published as an immutable `Arc`.
+    brains: RwLock<Option<Arc<Multi>>>,
     boot: Instant,
     boot_id: String,
     requests: AtomicU64,
     in_flight: AtomicU64,
+    /// The corpora file this process was started with, if any. `None` means the
+    /// webhook has nothing to pull and answers 501 rather than pretending.
+    corpora: Option<Arc<crate::corpus::Corpora>>,
 }
 
 pub async fn run(argv: &[String], global: &Global) -> Result<i32> {
+    // `--brain alias=path` belongs to the brain set rather than to this server's
+    // own flags, and it is read before `parse` so the two cannot disagree about
+    // what a valid argv looks like. `parse` still tolerates the flag so the
+    // caller is not asked to strip it first.
+    let explicit = brains::explicit(argv);
     let args = parse(argv)?;
+
+    // The corpora file, resolved once: the opener uses it for provenance and the
+    // webhook uses it to pull, so both must see the same answer.
+    let corpora = match crate::corpus::from_argv(argv) {
+        Some(Ok(c)) => Some(Arc::new(c)),
+        Some(Err(e)) => {
+            eprintln!("error: {e}");
+            return Ok(1);
+        }
+        None => None,
+    };
 
     if !args.web.join("index.html").is_file() {
         bail!(
@@ -175,11 +188,12 @@ pub async fn run(argv: &[String], global: &Global) -> Result<i32> {
 
     let srv = Arc::new(Server {
         args,
-        ctx: RwLock::new(None),
+        brains: RwLock::new(None),
         boot: Instant::now(),
         boot_id: format!("{:x}", std::process::id()),
         requests: AtomicU64::new(0),
         in_flight: AtomicU64::new(0),
+        corpora: corpora.clone(),
     });
 
     // 1 · the socket, before anything that can block.
@@ -194,54 +208,99 @@ pub async fn run(argv: &[String], global: &Global) -> Result<i32> {
     );
     log::line("api", "GET /health");
     log::line("api", "GET /api/config");
-    for route in ["/api/meta", "/api/entity", "/api/class", "/api/query"] {
+    for route in ["/api/brains", "/api/meta", "/api/entity", "/api/class", "/api/query"] {
         log::line("api", &format!("GET {route}"));
     }
 
-    // 2 · the database, in the background, with backoff.
+    // 2 · the databases, in the background, with backoff.
+    //
+    // Every brain in the set gets its own `Ctx` (its own pool, its own schema,
+    // its own T-box). One that cannot be reached is retried; one that still
+    // cannot be reached after the deadline is dropped from the set when the
+    // others are up, so a single moved checkout does not take the wiki down --
+    // but a server where *nothing* opens still exits, because a pod that can
+    // never reach its database should be visible as a crash rather than as a
+    // 503 forever.
     let global = global.clone();
+    if let Some(c) = &srv.corpora {
+        log::line("corpora", &format!("{} ({} entries)", c.file.display(), c.entries.len()));
+    }
+    let set = match brains::discover(&global, &explicit, srv.corpora.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::line("brains", &format!("cannot resolve the brain set: {e}"));
+            return Ok(1);
+        }
+    };
+    let default = set.default.clone();
     let opener = {
         let srv = srv.clone();
+        let corpora = corpora.clone();
         tokio::spawn(async move {
             let deadline = Instant::now() + STORE_OPEN_TIMEOUT;
+            // One gate for every brain: the model back end is a single GPU, so
+            // two brains walking at once would only interleave.
+            let gate = Arc::new(tokio::sync::Semaphore::new(1));
+            let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let multi = Multi::new(default);
+            let mut pending = set.list;
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
-                match Ctx::open(&global).await {
-                    Ok(ctx) => {
-                        let ctx = Arc::new(ctx);
-                        log::line(
-                            "pg",
-                            &format!(
-                                "connected after {attempt} attempt(s) — ontology {}",
-                                ctx.tbox.ontology
-                            ),
-                        );
-                        *srv.ctx.write().await = Some(ctx);
-                        return;
-                    }
-                    Err(e) => {
-                        if Instant::now() >= deadline {
-                            // Deliberate: a pod that can never reach its database
-                            // should be visible as a crash, not as a 503 forever.
-                            log::line("pg", &format!("giving up after {attempt} attempts: {e}"));
-                            std::process::exit(1);
-                        }
-                        let backoff =
-                            Duration::from_millis(
-                                u64::from((500 * 2u32.pow(attempt.min(5))).min(8_000)),
+                let mut retry = Vec::new();
+                for brain in pending.drain(..) {
+                    let alias = brain.alias.clone();
+                    // The corpora entry (when there is one) is where the repo and
+                    // ref come from; the SHA is whatever is checked out now.
+                    let corpus = corpora.as_ref().and_then(|c| c.get(&alias));
+                    match Ctx::open_brain(brain.clone()).await {
+                        Ok(mut ctx) => {
+                            ctx.crawl_gate = Arc::clone(&gate);
+                            ctx.crawl_waiting = Arc::clone(&waiting);
+                            log::line(
+                                "pg",
+                                &format!(
+                                    "connected {alias} (attempt {attempt}) — ontology {}, schema {}",
+                                    ctx.tbox.ontology, ctx.brain.pg_schema
+                                ),
                             );
-                        log::line(
-                            "pg",
-                            &format!(
-                                "attempt {attempt} failed ({}), retrying in {}ms",
-                                first_line(&e.to_string()),
-                                backoff.as_millis()
-                            ),
-                        );
-                        tokio::time::sleep(backoff).await;
+                            let prov = match corpus {
+                                Some(c) => Provenance::of(&ctx.brain, &c.repo, &c.git_ref),
+                                None => Provenance::of(&ctx.brain, "", ""),
+                            };
+                            multi.insert(ctx, prov);
+                        }
+                        Err(e) => {
+                            log::line(
+                                "pg",
+                                &format!("{alias}: {}", first_line(&e.to_string())),
+                            );
+                            retry.push(brain);
+                        }
                     }
                 }
+                if retry.is_empty() {
+                    publish(&srv, multi).await;
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    if multi.is_empty() {
+                        log::line("pg", "giving up: no brain could be opened");
+                        std::process::exit(1);
+                    }
+                    for brain in &retry {
+                        log::line(
+                            "pg",
+                            &format!("giving up on '{}' for now", brain.alias),
+                        );
+                    }
+                    publish(&srv, multi).await;
+                    return;
+                }
+                pending = retry;
+                let backoff =
+                    Duration::from_millis(u64::from((500 * 2u32.pow(attempt.min(5))).min(8_000)));
+                tokio::time::sleep(backoff).await;
             }
         })
     };
@@ -310,6 +369,16 @@ pub async fn run(argv: &[String], global: &Global) -> Result<i32> {
     opener.abort();
     log::line("shutdown", "bye");
     Ok(0)
+}
+
+/// Hand the opened set to the request path. Separate from the opener so the
+/// "publish exactly once, then never again" rule is a single line.
+async fn publish(srv: &Arc<Server>, multi: Multi) {
+    log::line(
+        "brains",
+        &format!("ready: {} brain(s), default {}", multi.len(), multi.default_db()),
+    );
+    *srv.brains.write().await = Some(Arc::new(multi));
 }
 
 /// One admitted connection's claim on `in_flight`.
@@ -389,9 +458,20 @@ async fn serve_connection(srv: Arc<Server>, mut stream: TcpStream) {
             return;
         }
 
+        // A POST body is the one thing the GET-only assumption above did not
+        // cover: the corpus webhook signs its *body* (GitHub's
+        // `X-Hub-Signature-256` shape), so the bytes have to be read before the
+        // route can decide anything. Bounded on purpose — an unauthenticated
+        // port asking for an unbounded read is how a server eats its own memory.
+        let body = if method == "POST" {
+            read_body(&mut stream, &mut buf, &head).await
+        } else {
+            Vec::new()
+        };
+
         let keep_alive = keep_alive(&method, &version, &head);
         let started = Instant::now();
-        let response = route(&srv, &method, &target).await;
+        let response = route(&srv, &method, &target, &head, &body).await;
 
         // Borrowed, not moved: the access log below still needs the status line
         // out of the same buffer it writes to the socket.
@@ -450,7 +530,13 @@ impl Response {
     }
 }
 
-async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
+async fn route(
+    srv: &Arc<Server>,
+    method: &str,
+    target: &str,
+    head: &str,
+    body: &[u8],
+) -> Response {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let head_only = method == "HEAD";
 
@@ -459,7 +545,8 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
             &json!({
                 "ok": true,
                 "app": srv.args.name,
-                "ready": srv.ctx.read().await.is_some(),
+                "ready": srv.brains.read().await.is_some(),
+                "brains": srv.brains.read().await.as_ref().map(|m| m.len()).unwrap_or(0),
                 "uptimeS": srv.boot.elapsed().as_secs(),
                 "requests": srv.requests.load(Ordering::Relaxed),
                 "bootId": srv.boot_id,
@@ -482,6 +569,55 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
             }),
             head_only,
         ),
+
+        // The dropdown's inventory: which brains this process serves, in the
+        // order the selector should offer them.
+        ("GET" | "HEAD", "/api/brains") => match srv.brains.read().await.clone() {
+            Some(multi) => json_response(&multi.list().await, head_only),
+            None => json_response(
+                &json!({"error": "unavailable", "detail": "database not ready"}),
+                head_only,
+            )
+            .status(503),
+        },
+
+        // ---- the corpus webhook --------------------------------------------
+        //
+        // The trigger that lets a corpus change land without a rebuild and
+        // without a restart: shallow-fetch every configured corpus, reindex the
+        // ones whose SHA moved, and swap the brains in. Auth is not optional
+        // here — `brain serve` is otherwise unauthenticated, and a route that
+        // shells out to `git` and truncates a schema is the last thing that
+        // should be reachable by anyone who can guess the path.
+        //
+        // Synchronous on purpose: a coordination corpus is small (a shallow
+        // `fetch --depth 1` plus a ~0.1 s reindex), and a caller that gets the
+        // report back can act on it. If corpora ever grow to where this takes
+        // minutes, the honest shape becomes `202` + a status route; until then a
+        // job registry would be machinery with no user.
+        ("POST", "/api/corpus/refresh") => {
+            let Some(multi) = srv.brains.read().await.clone() else {
+                return json_response(
+                    &json!({"error": "unavailable", "detail": "database not ready"}),
+                    head_only,
+                )
+                .status(503);
+            };
+            let only: Vec<String> = query_params(query)
+                .get("alias")
+                .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            let answer = crate::web::corpus_refresh(
+                &multi,
+                srv.corpora.as_deref(),
+                &only,
+                body,
+                header_of(head, "authorization"),
+                header_of(head, "x-hub-signature-256"),
+            )
+            .await;
+            json_response(&answer.body, head_only).status(answer.status)
+        }
 
         ("GET" | "HEAD", "/api/meta") => api(srv, Route::Meta, query, head_only).await,
         ("GET", "/api/entity") => api(srv, Route::Entity, query, head_only).await,
@@ -534,7 +670,7 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
         ("GET" | "HEAD", "/api/status") => json_response(
             &json!({
                 "app": srv.args.name,
-                "ready": srv.ctx.read().await.is_some(),
+                "ready": srv.brains.read().await.is_some(),
                 "uptimeS": srv.boot.elapsed().as_secs(),
                 "requests": srv.requests.load(Ordering::Relaxed),
                 // Always 0: this server accepts no HMR sockets, so there is no
@@ -553,6 +689,16 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
             &json!({"builds": [], "dev": false}),
             head_only,
         ),
+
+        // `/` has no database in it, and the wiki's URL contract says the first
+        // path segment names one (`/alpha/`, `/beta/`). The server picks the
+        // default here rather than the client, so a hard refresh or a pasted
+        // `http://host/` lands on a real page immediately and history shows the
+        // database the reader is in.
+        ("GET" | "HEAD", "/") => match srv.brains.read().await.clone() {
+            Some(multi) => redirect(&format!("/{}", multi.default_db()), head_only),
+            None => not_found(head_only),
+        },
 
         ("GET" | "HEAD", _) => {
             // The client owns every non-`/api/` route that is not a file: the
@@ -590,15 +736,30 @@ async fn route(srv: &Arc<Server>, method: &str, target: &str) -> Response {
 }
 
 async fn api(srv: &Arc<Server>, kind: Route, query: &str, head_only: bool) -> Response {
-    let Some(ctx) = srv.ctx.read().await.clone() else {
+    let Some(multi) = srv.brains.read().await.clone() else {
         return json_response(
             &json!({"error": "unavailable", "detail": "database not ready"}),
             head_only,
         )
         .status(503);
     };
-    let params = query_params(query);
-    match handle(&ctx, kind, &Owned::from_query(params)).await {
+    let req = Owned::from_query(query_params(query));
+    // A request that names a brain which is not served is a broken link, not a
+    // reason to answer with someone else's graph: 404, and say what does exist.
+    let ctx = match multi.ctx(req.db.as_deref()) {
+        Ok(c) => c,
+        Err(db) => {
+            return json_response(
+                &json!({
+                    "error": format!("no such brain: {db}"),
+                    "brains": multi.names(),
+                }),
+                head_only,
+            )
+            .status(404)
+        }
+    };
+    match handle(&ctx, kind, &req).await {
         Ok(v) => json_response(&v, head_only),
         Err(e) => json_response(
             // The dev server returned the same text; what changes is that the
@@ -792,10 +953,14 @@ impl WithStatus for Response {
     fn status(self, code: u16) -> Response {
         let reason = match code {
             400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
             426 => "Upgrade Required",
             500 => "Internal Server Error",
+            501 => "Not Implemented",
             503 => "Service Unavailable",
             _ => "OK",
         };
@@ -822,11 +987,68 @@ fn restamp(bytes: Vec<u8>, code: u16, reason: &str) -> Vec<u8> {
     }
 }
 
+/// A permanent-enough redirect for a route that only ever means one thing.
+///
+/// 302 rather than 301: the default brain is a *server* choice, and a browser
+/// that memorised it permanently would keep landing on a database the operator
+/// has since changed.
+fn redirect(location: &str, head_only: bool) -> Response {
+    let head = format!(
+        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+         Cache-Control: no-store\r\nConnection: keep-alive\r\n\r\n"
+    );
+    if head_only {
+        Response::HeadOnly(head.into_bytes())
+    } else {
+        Response::Full(head.into_bytes())
+    }
+}
+
 fn not_found(head_only: bool) -> Response {
     json_response(&json!({"error": "not_found"}), head_only).status(404)
 }
 
 // ── HTTP parsing ───────────────────────────────────────────────────────────
+
+/// A webhook body ceiling. GitHub's payloads are a few KB; anything larger is a
+/// client that misunderstood the route, and refusing it is kinder than buffering.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Read exactly `Content-Length` bytes, consuming the pipelined remainder first.
+async fn read_body(stream: &mut TcpStream, buf: &mut Vec<u8>, head: &str) -> Vec<u8> {
+    let want = content_length(head).unwrap_or(0).min(MAX_BODY_BYTES);
+    let mut body = Vec::with_capacity(want);
+    while body.len() < want {
+        if !buf.is_empty() {
+            let take = (want - body.len()).min(buf.len());
+            body.extend_from_slice(&buf[..take]);
+            buf.drain(..take);
+            continue;
+        }
+        let mut chunk = [0u8; 8 * 1024];
+        match tokio::time::timeout(READ_TIMEOUT, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => body.extend_from_slice(&chunk[..n]),
+            _ => break,
+        }
+    }
+    body
+}
+
+fn content_length(head: &str) -> Option<usize> {
+    head.lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse().ok())
+}
+
+/// A request header's value, case-insensitive.
+fn header_of<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+}
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
@@ -876,13 +1098,25 @@ async fn serve_stream(srv: &Arc<Server>, stream: &mut TcpStream, query: &str) ->
         )
         .await;
     }
-    let Some(ctx) = srv.ctx.read().await.clone() else {
+    let Some(multi) = srv.brains.read().await.clone() else {
         return write_all(
             stream,
             b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\n\
               Content-Length: 27\r\nConnection: close\r\n\r\n{\"error\":\"not ready\"}\n",
         )
         .await;
+    };
+    let Ok(ctx) = multi.ctx(params.get("db").map(String::as_str)) else {
+        // Same reason the JSON routes 404: a stream that names a brain this
+        // server does not serve must say so, not crawl someone else's graph.
+        let body = json!({"error": format!("no such brain: {}", params.get("db").cloned().unwrap_or_default())})
+            .to_string();
+        let head = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}\n",
+            body.len() + 1
+        );
+        return write_all(stream, head.as_bytes()).await;
     };
 
     // Headers immediately, before any work: a client that is watching progress
@@ -895,46 +1129,43 @@ async fn serve_stream(srv: &Arc<Server>, stream: &mut TcpStream, query: &str) ->
     )
     .await?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::query::crawl::Progress>();
     let limit = params
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(20);
-    let mut job = tokio::spawn(async move { crate::web::crawl_payload(&ctx, &q, limit, Some(tx)).await });
 
-    // Once the crawl returns, its sink drops and `rx.recv()` starts yielding
-    // None forever -- which would spin this loop, and worse, would make it
-    // believe the stream was over while the search/ontology half of the payload
-    // is still running. So the receive arm retires itself on the first None and
-    // the job arm stays the only way out.
-    let mut listening = true;
-    loop {
-        tokio::select! {
-            ev = rx.recv(), if listening => match ev {
-                Some(p) => {
-                    let Ok(body) = serde_json::to_string(&p) else { continue };
-                    write_all(stream, format!("event: step\ndata: {body}\n\n").as_bytes()).await?;
-                }
-                None => listening = false,
-            },
-            // Bounded, because this task holds a connection and an in_flight
-            // slot: the walk has its own 6 s budget, but a hung search or
-            // ontology leg behind it should not pin a socket indefinitely.
-            r = tokio::time::timeout(STREAM_TIMEOUT, &mut job) => {
-                let (kind, body) = match r {
-                    Err(_) => ("error", r#"{"error":"stream timeout"}"#.to_string()),
-                    Ok(Err(_)) => ("error", r#"{"error":"crawl panicked"}"#.to_string()),
-                    Ok(Ok(Err(e))) => ("error", json!({"error": e.to_string()}).to_string()),
-                    Ok(Ok(Ok(v))) => serde_json::to_string(&v)
-                        .map(|s| ("result", s))
-                        .unwrap_or_else(|_| ("error", r#"{"error":"serialise failed"}"#.to_string())),
-                };
-                write_all(stream, format!("event: {kind}\ndata: {body}\n\n").as_bytes()).await?;
-                break;
-            }
-        }
+    // From here the walk is `web::crawl_events`: the same loop the dev server
+    // runs, with only the write differing. The events, the ordering, the
+    // identical-result guarantee and the 25 s ceiling all live there, so a
+    // change made while developing (in `brain web`, where the progress feed used
+    // to be missing) is the change that ships.
+    let mut sink = SocketSink { stream };
+    match crate::web::crawl_events(ctx, &q, limit, &mut sink).await {
+        Ok(()) => Ok(()),
+        // A dropped reader and a failed write both end here, and both are normal
+        // ways for a stream to finish; the connection is closed either way.
+        Err(e) => Err(std::io::Error::other(e.to_string())),
     }
-    Ok(())
+}
+
+/// [`crate::web::EventSink`] over the connection's own socket.
+struct SocketSink<'a> {
+    stream: &'a mut TcpStream,
+}
+
+impl crate::web::EventSink for SocketSink<'_> {
+    async fn frame(&mut self, kind: &str, data: &str) -> Result<()> {
+        let body = format!("event: {kind}\ndata: {data}\n\n");
+        write_all(self.stream, body.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("writing an SSE frame: {e}"))
+    }
+
+    fn gone(&mut self) -> bool {
+        // A dead socket fails the next write, which is both faster and more
+        // exact than polling for readability here.
+        false
+    }
 }
 
 fn keep_alive(method: &str, version: &str, head: &str) -> bool {
@@ -1107,6 +1338,14 @@ fn parse(argv: &[String]) -> Result<Args> {
             "--name" => a.name = value()?,
             "--pkg-js" => a.pkg_js = value()?,
             "--pkg-wasm" => a.pkg_wasm = value()?,
+            // Consumed by `brains::explicit` before this runs; tolerated here so
+            // the flag is usable without the caller stripping it.
+            "--brain" | "--corpora" => {
+                i += 1;
+                if argv.get(i).is_none() {
+                    bail!("{flag} needs a value");
+                }
+            }
             "--quiet" => a.log = false,
             "-h" | "--help" => bail!("usage: brain serve [--host H] [--port N] [--web DIR] [--name N]"),
             other if other.starts_with("--port=") => {
@@ -1121,6 +1360,7 @@ fn parse(argv: &[String]) -> Result<Args> {
             other if other.starts_with("--assets=") => {
                 a.assets.push(PathBuf::from(&other["--assets=".len()..]))
             }
+            other if other.starts_with("--brain=") || other.starts_with("--corpora=") => {}
             other => bail!("unknown flag for `brain serve`: {other}"),
         }
         i += 1;

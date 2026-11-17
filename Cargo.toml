@@ -57,6 +57,9 @@ walkdir = "2"
 rayon = "1"
 sha2 = "0.10"
 hex = "0.4"
+# HMAC-SHA256 for the corpus webhook signature (GitHub's `X-Hub-Signature-256`
+# shape), so a trigger cannot be forged by anyone who can reach the port.
+hmac = "0.12"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1060,7 +1060,7 @@ schema already has. Never invent content that the document does not state."
     Ok(0)
 }
 
-/// Insert `[[wiki-links]]` for entities a document mentions.
+/// Insert `[[Class/id|Label]]` entity wikilinks for entities a document mentions.
 pub async fn enrich(ctx: &Ctx, path: &Path, create_missing: bool) -> Result<i32> {
     let mut files: Vec<PathBuf> = Vec::new();
     if path.is_dir() {
@@ -1097,13 +1097,14 @@ pub async fn enrich(ctx: &Ctx, path: &Path, create_missing: bool) -> Result<i32>
         let mut out = text.clone();
         let mut hits = 0usize;
         for (label, _slug) in &labels {
-            if out.contains(&format!("[[{label}]]")) {
+            let wiki = format!("[[{_slug}|{label}]]");
+            if out.contains(&wiki) || out.contains(&format!("[[{label}]]")) {
                 continue;
             }
             // one link per label per document: the first mention is the one a
             // reader follows
             if let Some(at) = find_word(&out, label) {
-                out.replace_range(at..at + label.len(), &format!("[[{label}]]"));
+                out.replace_range(at..at + label.len(), &wiki);
                 hits += 1;
             }
         }
@@ -1120,7 +1121,7 @@ pub async fn enrich(ctx: &Ctx, path: &Path, create_missing: bool) -> Result<i32>
     Ok(0)
 }
 
-/// A whole-word, case-sensitive match outside an existing `[[…]]`.
+/// A whole-word, case-sensitive match outside an existing wikilink.
 fn find_word(hay: &str, needle: &str) -> Option<usize> {
     let mut from = 0usize;
     while let Some(rel) = hay[from..].find(needle) {
@@ -1129,14 +1130,14 @@ fn find_word(hay: &str, needle: &str) -> Option<usize> {
             || !hay[..at]
                 .chars()
                 .next_back()
-                .map(|c| c.is_alphanumeric() || c == '[')
+                .map(|c| c.is_alphanumeric() || c == '[' || c == '{')
                 .unwrap_or(false);
         let after = at + needle.len();
         let after_ok = after >= hay.len()
             || !hay[after..]
                 .chars()
                 .next()
-                .map(|c| c.is_alphanumeric() || c == ']')
+                .map(|c| c.is_alphanumeric() || c == ']' || c == '}')
                 .unwrap_or(false);
         if before_ok && after_ok {
             return Some(at);

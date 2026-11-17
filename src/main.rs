@@ -6,10 +6,12 @@
 
 mod abox;
 mod bench;
+mod brains;
 mod cli;
 mod commands;
 mod config;
 mod convert;
+mod corpus;
 mod ecs;
 mod index;
 mod llm;
@@ -197,9 +199,17 @@ async fn run(argv: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
 
-    // `init`, `use` and `pg` work without a resolvable brain; everything else
-    // needs one.
-    if !matches!(cmd.as_str(), "init" | "use" | "pg" | "convert") && !config::exists(global.db.as_deref()) {
+    // `init`, `use`, `pg` and `corpus` work without a resolvable brain;
+    // everything else needs one. `corpus` in particular is *how* a brain
+    // arrives on a fresh container, so requiring one would be circular — and a
+    // container passes `--corpora` instead of `--db`, so the two servers count
+    // as "has a brain" when a corpora file is configured.
+    let from_corpora =
+        matches!(cmd.as_str(), "web" | "serve") && corpus::discover(corpus::flag(&rest).as_deref()).is_some();
+    if !from_corpora
+        && !matches!(cmd.as_str(), "init" | "use" | "pg" | "convert" | "corpus")
+        && !config::exists(global.db.as_deref())
+    {
         eprintln!("fatal: brain database not found.");
         eprintln!(
             "select a database with `brain use`, pass `--use <alias>` or `--db <path>`, \

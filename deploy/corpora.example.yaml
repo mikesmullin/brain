@@ -1,0 +1,38 @@
+# corpora.yaml — the repositories a brain server serves.
+#
+# Mount this file into the container (or set BRAIN_CORPORA to its path). The
+# initContainer shallow-clones every entry, and `POST /api/corpus/refresh` pulls
+# the same file on demand — so a corpus change lands with a HTTP call instead of
+# an image rebuild, and boot and webhook can never disagree about the set.
+#
+# This file is an EXAMPLE, shipped in the image for reference. The real one is
+# deployment configuration (a ConfigMap), because it names private repositories.
+#
+#   default: which corpus a bare `/` lands on, and what `--db`-less commands read.
+#   repo:    a URL `git` understands. Use `file://` for a local test remote.
+#   ref:     branch or tag to track (default: main).
+#   subdir:  where the brain lives inside the repository. `.brain` for a
+#            coordination repo; omit it for a repository that *is* a brain.
+#   dest:    where to check it out (optional; defaults to
+#            `$BRAIN_CORPORA_DIR/<alias>`, else `corpora/<alias>` beside this file).
+#
+# Everything is pulled shallow (`--depth 1`), so a refresh costs one fetch of the
+# delta and a reindex — not a re-clone.
+
+default: alpha
+
+corpora:
+  alpha:
+    repo: https://git.example.com/alpha/coord.git
+    ref: main
+    subdir: .brain
+
+  beta:
+    repo: https://git.example.com/beta/coord.git
+    ref: main
+    subdir: .brain
+
+  gamma:
+    repo: https://git.example.com/gamma/coord.git
+    ref: main
+    subdir: .brain

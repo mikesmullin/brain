@@ -204,6 +204,16 @@ impl Default for PgConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BrainConfig {
+    /// What this brain calls itself.
+    ///
+    /// Unset, a brain is named after the directory it lives in, which is fine
+    /// for `~/brain/my-db` and actively wrong for a coordination repo: every
+    /// coord repo keeps its brain in `.brain/`, so all of them would be called
+    /// "brain" — the same alias, and therefore the same PostgreSQL schema.
+    /// A brain that names itself is a brain that can sit beside its siblings:
+    /// `alias: alpha` / `alias: beta` / `alias: gamma`, one schema each.
+    #[serde(default)]
+    pub alias: Option<String>,
     #[serde(default)]
     pub embed: EmbedConfig,
     #[serde(default)]
@@ -609,15 +619,7 @@ fn find_project_upward(start: &Path) -> Option<PathBuf> {
 /// then the saved `current`, then the cwd (walking up).
 pub fn resolve(db_override: Option<&str>) -> Result<Brain> {
     if let Some(d) = db_override {
-        let p = expand(d);
-        let p = p.canonicalize().unwrap_or(p);
-        // accept either the project root or the db/ dir itself
-        let (project_root, db_root) = if p.join("db").is_dir() {
-            (p.clone(), p.join("db"))
-        } else {
-            (p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.clone()), p.clone())
-        };
-        return Ok(build(alias_from_project(&project_root), project_root, db_root));
+        return from_root(&expand(d));
     }
     let brains = load_brains()?;
     let want = use_override().or_else(|| brains.current.clone());
@@ -650,8 +652,46 @@ pub fn resolve(db_override: Option<&str>) -> Result<Brain> {
     }
 }
 
+/// Resolve one explicit path — a project root, a `db/` dir, or a directory that
+/// holds the brain (`.brain/` itself) — into a `Brain`.
+///
+/// The alias comes from `brain.yaml: alias:` when the brain declares one, and
+/// from the directory name otherwise. The schema follows the alias unless
+/// `pg.schema` pins it: one brain, one schema, and a brain that names itself can
+/// be served beside its siblings without either of them landing in the other's
+/// namespace.
+pub fn from_root(path: &Path) -> Result<Brain> {
+    from_root_named(path, None)
+}
+
+/// [`from_root`], with a name to use when the brain does not declare one itself.
+/// This is the path a *registry* takes: `~/.config/brain/brains.yaml` is a map of
+/// alias to path, and its key is the alias.
+pub fn from_root_named(path: &Path, named: Option<&str>) -> Result<Brain> {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // accept either the project root or the db/ dir itself
+    let (project_root, db_root) = if p.join("db").is_dir() {
+        (p.clone(), p.join("db"))
+    } else {
+        (p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.clone()), p.clone())
+    };
+    let alias = named
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| alias_from_project(&project_root));
+    Ok(build(alias, project_root, db_root))
+}
+
 fn build(alias: String, project_root: PathBuf, db_root: PathBuf) -> Brain {
     let config = load_brain_config(&project_root);
+    let alias = config
+        .alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or(alias);
     let pg_schema = config
         .pg
         .schema

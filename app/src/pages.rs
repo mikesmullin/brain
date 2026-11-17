@@ -11,20 +11,43 @@ use rustex1_kit::mjs::Def;
 use rustex1_kit::{js, mjs, Runtime};
 use wasm_bindgen::prelude::*;
 
-use crate::store;
+use crate::{md, store};
 
 pub fn register(_rt: &mut Runtime) {
     mjs::router_set_mode("path");
-    mjs::router_register("/", "brain", |_| home());
+    // The first path segment names the brain (`/alpha`, `/beta`), so every route
+    // below is one segment deeper than it used to be. The URL is the state: the
+    // database you are reading is where you are, not something hidden in a
+    // store — a link into one brain's entity is a link that opens that brain.
+    //
+    // Registered most-specific-last is *not* how m-js matches: it takes the
+    // first route whose regex matches, in registration order, and `/:db` cannot
+    // match a deeper path because its segment is `[^/]+`. So `/` first, then the
+    // bare database, then everything under it.
+    mjs::router_register("/", "brain", |_| landing());
+    mjs::router_register("/:db", "brain", |p| home(p));
     // The search state is in the path, not a query string: m-js's Router
     // matches on the pathname and drops everything after `?`.
-    mjs::router_register("/search/:q", "brain · search", |p| search(p));
-    mjs::router_register("/search/:q/:mode", "brain · search", |p| search(p));
+    mjs::router_register("/:db/search/:q", "brain · search", |p| search(p));
+    mjs::router_register("/:db/search/:q/:mode", "brain · search", |p| search(p));
     // m-js's `:param` matches one path segment, so a slug's two halves are two
     // params — which is also the distinction the page wants: one segment is a
     // class listing, two is an entity.
-    mjs::router_register("/e/:cls", "brain · class", |p| class_page(p));
-    mjs::router_register("/e/:cls/:id", "brain · entity", |p| entity_page(p));
+    mjs::router_register("/:db/e/:cls", "brain · class", |p| class_page(p));
+    mjs::router_register("/:db/e/:cls/:id", "brain · entity", |p| entity_page(p));
+}
+
+/// `/` names no database, so it cannot render one: it asks the server which
+/// brains exist and then hands the browser a URL that says where it is.
+///
+/// The redirect happens in the `dbs` store's callback rather than here, so a
+/// navigation never re-enters the router while it is still rendering the route
+/// that asked for it.
+fn landing() -> JsValue {
+    store::load_dbs();
+    let mut d = Def::new().named("route /");
+    d.tree(m("div").class("spinner").child(lit("opening…")));
+    d.finish()
 }
 
 // ── chrome ──────────────────────────────────────────────────────────────────
@@ -51,8 +74,24 @@ fn bar() -> Node {
             .kids(vec![
                 m("span").class("glyph").child(lit("🧠")),
                 m("span").child(lit("brain")),
-                m("span").class("onto").text("$store.meta.ontology"),
             ]),
+        // Which knowledge graph this page reads. A native `<select>` on purpose:
+        // it is the one control every browser and screen reader already knows,
+        // and the list is short. Changing it navigates (`/beta`), because the
+        // database belongs in the URL — this is a different graph, not a filter.
+        m("select")
+            .class("db")
+            .attr("aria-label", "brain database")
+            .attr("title", "switch brain database")
+            .bind("value", "$store.meta.db")
+            .on("change", "$store.nav.switchDb($event)")
+            .child(
+                m("option")
+                    .for_each("d in $store.dbs.list")
+                    .key("d.db")
+                    .bind("value", "d.db")
+                    .text("d.db"),
+            ),
         m("form")
             .class("search")
             .on("submit", "$store.serp.submit($event)")
@@ -72,8 +111,21 @@ fn bar() -> Node {
 
 /// Classes with their counts, and the graph's size. Every page carries it, so
 /// the schema is always one click away from whatever you are reading.
+/// Classes with their counts, and the graph's size. Every page carries it, so
+/// the schema is always one click away from whatever you are reading.
+///
+/// The graph's size comes first and carries no card chrome: three numbers in a
+/// row are a readout, not navigation, and a box drawn around them would say
+/// they are something to click.
 fn sidebar() -> Node {
     m("aside").kids(vec![
+        m("div").class("stats-line").kids(vec![
+            stat("entities", "$store.meta.entities.toLocaleString()"),
+            m("span").class("sep").child(lit("·")),
+            stat("edges", "$store.meta.links.toLocaleString()"),
+            m("span").class("sep").child(lit("·")),
+            stat("relations", "$store.meta.relations.length"),
+        ]),
         m("div").class("box").kids(vec![
             m("h3").child(lit("Classes")),
             m("ul").on("click", "$store.nav.link($event)").child(
@@ -81,26 +133,29 @@ fn sidebar() -> Node {
                     .for_each("c in $store.meta.classes.filter(x => x.count > 0)")
                     .key("c.name")
                     .kids(vec![
-                        m("a").bind("href", "'/e/' + c.name").text("c.name"),
+                        m("a")
+                            .bind("href", "'/' + $store.meta.db + '/e/' + c.name")
+                            .kids(vec![
+                                m("i")
+                                    .class("ph ph-blueprint class-icon")
+                                    .attr("aria-hidden", "true"),
+                                m("span").text("c.name"),
+                            ]),
                         m("span").class("n").text("c.count.toLocaleString()"),
                     ]),
             ),
         ]),
-        m("div").class("box").kids(vec![
-            m("h3").child(lit("Graph")),
-            m("ul").kids(vec![
-                stat_row("entities", "$store.meta.entities.toLocaleString()"),
-                stat_row("edges", "$store.meta.links.toLocaleString()"),
-                stat_row("relations", "$store.meta.relations.length"),
-            ]),
-        ]),
     ])
 }
 
-fn stat_row(label: &str, expr: &str) -> Node {
-    m("li").kids(vec![
-        m("span").child(lit(label)),
-        m("span").class("n").text(expr),
+/// One statistic in the sidebar readout: a muted mono label, then the value.
+/// The class is `metric`, not `stat`, on purpose — the kit skin styles every
+/// `.stat` as a card (background, border, padding), and these three are meant to
+/// be bare text. A name the kit does not claim keeps that decision ours.
+fn stat(label: &str, expr: &str) -> Node {
+    m("span").class("metric").kids(vec![
+        m("span").class("k").child(lit(label)),
+        m("span").class("v").text(expr),
     ])
 }
 
@@ -123,8 +178,10 @@ fn spinner(expr: &str) -> Node {
 
 // ── home ────────────────────────────────────────────────────────────────────
 
-fn home() -> JsValue {
-    let mut d = Def::new().named("route /");
+fn home(params: JsValue) -> JsValue {
+    let db = js::get_str(&params, "db");
+    store::load_meta(&db);
+    let mut d = Def::new().named("route /:db");
     d.tree(shell(vec![
         m("div").class("kicker").child(lit("knowledge graph")),
         m("h1").text("$store.meta.ontology"),
@@ -146,7 +203,7 @@ is a path that exists.",
                 .class("card")
                 .for_each("c in $store.meta.classes.filter(x => x.count > 0)")
                 .key("c.name")
-                .bind("href", "'/e/' + c.name")
+                .bind("href", "'/' + $store.meta.db + '/e/' + c.name")
                 .kids(vec![
                     m("div").class("t").text("c.name"),
                     m("div").class("n").text("c.count.toLocaleString() + ' entities'"),
@@ -172,24 +229,33 @@ fn big(value: &str, label: &str) -> Node {
 // ── one class ───────────────────────────────────────────────────────────────
 
 fn class_page(params: JsValue) -> JsValue {
+    let db = js::get_str(&params, "db");
     let cls = js::get_str(&params, "cls");
-    store::load_class(&cls);
-    let mut d = Def::new().named("route /e/:cls");
+    store::load_meta(&db);
+    store::load_class(&db, &cls);
+    let mut d = Def::new().named("route /:db/e/:cls");
+    d.method("snippetHtml", |_this, args| snippet_html(&args));
     d.tree(shell(vec![
         spinner("'reading…'"),
         m("div").class("err").iff("$store.page.error").text("$store.page.error"),
         m("div").iff("$store.page.listing").kids(vec![
             m("div").class("kicker").child(lit("class")),
             m("h1").text("$store.page.listing.class"),
-            m("div").class("grid").child(
-                m("a")
-                    .class("card")
+            // The same row shape the SERP uses: a badge, then the note's opening.
+            // A class is a set of entities and a reader's question is "which one
+            // is this?" — a label alone cannot answer it, a card per entity
+            // pretends there is something to browse.
+            m("div").class("entity-rows").child(
+                m("div")
+                    .class("entity-row")
                     .for_each("x in $store.page.listing.entities")
                     .key("x.slug")
-                    .bind("href", "'/e/' + x.slug")
                     .kids(vec![
-                        m("div").class("t").text("x.label"),
-                        m("div").class("n").text("x.slug"),
+                        entity_badge("x.slug", "x.label", ""),
+                        m("div")
+                            .class("snippet")
+                            .iff("x.summary")
+                            .inner_html("snippetHtml(x.summary)"),
                     ]),
             ),
             m("div")
@@ -204,11 +270,13 @@ fn class_page(params: JsValue) -> JsValue {
 // ── one entity ──────────────────────────────────────────────────────────────
 
 fn entity_page(params: JsValue) -> JsValue {
+    let db = js::get_str(&params, "db");
     let cls = js::get_str(&params, "cls");
     let id = js::get_str(&params, "id");
-    store::load_entity(&cls, &id);
+    store::load_meta(&db);
+    store::load_entity(&db, &cls, &id);
 
-    let mut d = Def::new().named("route /e/:cls/:id");
+    let mut d = Def::new().named("route /:db/e/:cls/:id");
     // `fmt` and `quals` are page methods rather than template expressions: a
     // field's value can be a list, a number, a block of prose or a nested
     // object, and deciding that in a template is how a template becomes a
@@ -227,12 +295,23 @@ fn entity_page(params: JsValue) -> JsValue {
         }
         JsValue::from_str(&parts.join(" "))
     })
-    // [[wiki-links]] become links and paragraphs become paragraphs. There is no
-    // Markdown engine here on purpose: an entity's body is prose, not a
-    // document, and the fields above it carry the structure.
+    // Component values use the same small HTML formatter for scalar fields and
+    // list items. It escapes data first, then turns bare http(s) URLs into
+    // ordinary anchors; values never become executable markup.
+    .method("fieldHtml", |_this, args| {
+        JsValue::from_str(&field_html(&js::arg(&args, 0)))
+    })
+    // The note body is Markdown, rendered by the small engine in md: headings,
+    // lists, code, **bold**, *italic*, and links. The file's own `# Class/id`
+    // title is dropped in `md::render` — the page header already shows the
+    // class, label and slug.
     .method("prose", |_this, args| {
         let text = js::arg_str(&args, 0);
-        JsValue::from_str(&render_prose(&text))
+        let slug = js::arg_str(&args, 1);
+        // The note's own brain is ambient: every entity link in the body has to
+        // stay inside the database the note came from.
+        let db = js::get_str(&mjs::store_ref("meta"), "db");
+        JsValue::from_str(&md::render(&text, &slug, &db))
     })
     .tree(shell(vec![
         spinner("'reading…'"),
@@ -241,7 +320,7 @@ fn entity_page(params: JsValue) -> JsValue {
             m("header").kids(vec![
                 m("div").class("kicker").child(
                     m("a")
-                        .bind("href", "'/e/' + $store.page.entity.class")
+                        .bind("href", "'/' + $store.meta.db + '/e/' + $store.page.entity.class")
                         .text("$store.page.entity.class"),
                 ),
                 m("h1").text("$store.page.entity.label"),
@@ -250,7 +329,7 @@ fn entity_page(params: JsValue) -> JsValue {
             m("div")
                 .class("prose")
                 .iff("$store.page.entity.body && $store.page.entity.body.trim()")
-                .inner_html("prose($store.page.entity.body)"),
+                .inner_html("prose($store.page.entity.body, $store.page.slug)"),
             // components
             m("div").for_each("c in $store.page.entity.components").key("c.alias").kids(vec![
                 m("h2").text("c.alias"),
@@ -259,13 +338,13 @@ fn entity_page(params: JsValue) -> JsValue {
                         m("dt").text("f.name"),
                         m("dd")
                             .iff("Array.isArray(f.value)")
-                            .child(m("div").class("chips").child(
-                                m("span").class("chip").for_each("v in f.value").key("v").text("v"),
+                            .child(m("ul").class("field-list").child(
+                                m("li").for_each("v in f.value").key("v").inner_html("fieldHtml(v)"),
                             )),
                         m("dd")
                             .iff("!Array.isArray(f.value)")
                             .bind("class", "String(f.value).length > 120 ? 'long' : ''")
-                            .text("fmt(f.value)"),
+                            .inner_html("fieldHtml(f.value)"),
                     ]),
                 ),
             ]),
@@ -279,21 +358,96 @@ fn entity_page(params: JsValue) -> JsValue {
                 m("h2").child(lit("Referenced by")),
                 edge_block("r in $store.page.entity.in", true),
             ]),
-            m("h2").child(lit("Source")),
-            m("pre").text("$store.page.entity.markdown"),
+            m("details").class("source").kids(vec![
+                m("summary")
+                    .child(lit("Source"))
+                    .child(chev("m9 10.5 4.5 4.5 4.5-4.5", "cvn-down"))
+                    .child(chev("m9 13.5 4.5-4.5 4.5 4.5", "cvn-up")),
+                m("pre").text("$store.page.entity.markdown"),
+            ]),
         ]),
     ]));
     d.finish()
 }
 
+/// An inline Phosphor chevron SVG (the rustex1 webfont subset has no
+/// `ph-chevron-down`/`ph-chevron-up`, but m-js renders SVG natively). Returns
+/// a 14x14 stroke chevron; the glyph `d` is passed in.
+fn chev(path: &str, cls: &str) -> Node {
+    m("svg")
+        .class(cls)
+        .attr("width", "14")
+        .attr("height", "14")
+        .attr("viewBox", "0 0 24 24")
+        .attr("fill", "none")
+        .attr("stroke", "currentColor")
+        .attr("stroke-width", "2")
+        .attr("stroke-linecap", "round")
+        .attr("stroke-linejoin", "round")
+        .attr("aria-hidden", "true")
+        .child(m("path").attr("d", path))
+}
+
+/// The entity badge: a cube, a label, and the slug as the hover tooltip — the
+/// one way this UI points at another entity.
+///
+/// Every badge links into the brain the page was loaded from, so `slug` is an
+/// *expression* the template evaluates (`h.slug`, `s`, `t.slug`), never a value
+/// baked in at build time.
+///
+/// `extra` is appended to the class list — a relation pill wants `relation-pill`
+/// on top of the badge's own classes; pass `""` for a plain badge.
+fn entity_badge(slug_expr: &str, label_expr: &str, extra: &str) -> Node {
+    let class = if extra.is_empty() {
+        "entity-link entity-pill entity-badge".to_string()
+    } else {
+        format!("entity-link entity-pill entity-badge {extra}")
+    };
+    m("a")
+        .class(&class)
+        .bind("href", &format!("'/' + $store.meta.db + '/e/' + {slug_expr}"))
+        // The native `title`, not the kit's custom bubble: the prose pills
+        // already behave this way, and a badge is an ordinary link first.
+        .bind("title", slug_expr)
+        .bind("data-entity", slug_expr)
+        .kids(vec![
+            m("i")
+                .class("ph ph-cube entity-pill-icon")
+                .attr("aria-hidden", "true"),
+            m("span").class("entity-pill-label").text(label_expr),
+        ])
+}
+
+/// The template method `snippetHtml(x)`: one fragment of note prose as HTML.
+///
+/// Shared by the SERP and a class listing because both show an excerpt, and an
+/// excerpt containing `[[Class/id|Label]]` has to read as the badge the note
+/// would render — not as syntax. The brain is the page's own, taken from the
+/// store, so a badge inside prose stays inside the database it came from.
+fn snippet_html(args: &js_sys::Array) -> JsValue {
+    let text = js::arg_str(args, 0);
+    let db = js::get_str(&mjs::store_ref("meta"), "db");
+    JsValue::from_str(&md::snippet(&text, &db))
+}
+
 fn edge_block(for_expr: &str, incoming: bool) -> Node {
     m("div").class("rel").for_each(for_expr).key("r.rel").kids(vec![
-        m("span")
-            .class(if incoming { "name in" } else { "name" })
-            .text("r.rel"),
+        m("div").class("rel-head").kids(vec![
+            m("i")
+                .class(if incoming {
+                    "ph ph-arrow-left rel-dir in"
+                } else {
+                    "ph ph-arrow-right rel-dir out"
+                })
+                .attr("role", "img")
+                .attr("aria-label", if incoming { "incoming" } else { "outgoing" }),
+            m("span")
+                .class(if incoming { "name in" } else { "name" })
+                .text("r.rel"),
+        ]),
         m("ul").child(
             m("li").for_each("t in r.targets").key("t.slug").kids(vec![
-                m("a").bind("href", "'/e/' + t.slug").text("t.label"),
+                entity_badge("t.slug", "t.label", "relation-pill"),
                 m("span")
                     .class("qual")
                     .iff("t.qualifiers && t.qualifiers.length")
@@ -309,14 +463,16 @@ fn search(params: JsValue) -> JsValue {
     // The URL is the state. Reading it from the route params rather than from
     // the store is what makes a pasted link, an edited URL and a Back press all
     // produce the same page.
+    let db = js::get_str(&params, "db");
     let q = decode(&js::get_str(&params, "q"));
     let mode = match js::get_str(&params, "mode") {
-        m if m.is_empty() => "crawl".to_string(),
+        m if m.is_empty() => "ontology".to_string(),
         m => m,
     };
-    store::run_query(&q, &mode);
+    store::load_meta(&db);
+    store::run_query(&db, &q, &mode);
 
-    let mut d = Def::new().named("route /search");
+    let mut d = Def::new().named("route /:db/search");
     d.method("crawlMeta", |_this, args| {
         let c = js::arg(&args, 0);
         let kind = js::get_str(&c, "kind");
@@ -330,6 +486,14 @@ fn search(params: JsValue) -> JsValue {
         parts.push(format!("{}ms", js::get_num(&c, "ms") as u64));
         JsValue::from_str(&parts.join(" · "))
     })
+    .method("answerHtml", |_this, args| {
+        let text = js::arg_str(&args, 0);
+        let db = js::get_str(&mjs::store_ref("meta"), "db");
+        JsValue::from_str(&md::render(&text, "", &db))
+    })
+    // Snippets are note prose cut to fit: `[[Class/id|Label]]` inside one has to
+    // read as the same entity badge the note would show, not as raw syntax.
+    .method("snippetHtml", |_this, args| snippet_html(&args))
     .method("fallbackNote", |_this, args| {
         // Say WHY the mode switched. The reasons are different facts and deserve
         // different sentences: "ran out of time" tells the user to rephrase or
@@ -373,23 +537,24 @@ fn search(params: JsValue) -> JsValue {
         let nodes = js::get(&p, "nodes");
         let via = js::get(&p, "via");
         let n = js::get_num(&nodes, "length") as u32;
+        let db = js::get_str(&mjs::store_ref("meta"), "db");
         let mut out = String::new();
         for i in 0..n {
             let node = js::get_str(&nodes, &i.to_string());
             if i > 0 {
                 let rel = js::get_str(&via, &(i - 1).to_string());
-                out.push_str(&format!(r#" <span class="via">--{}--&gt;</span> "#, escape(&rel)));
+                out.push_str(&format!(r#" <span class="via">--{}--&gt;</span> "#, md::escape(&rel)));
             }
             out.push_str(&format!(
-                r#"<a href="/e/{}">{}</a>"#,
-                escape(&node),
-                escape(&node)
+                r#"<a href="/{}/e/{}">{}</a>"#,
+                md::escape(&db),
+                md::escape(&node),
+                md::escape(&node)
             ));
         }
         JsValue::from_str(&out)
     })
     .tree(shell(vec![
-        m("div").class("kicker").text("$store.serp.mode + ' · ' + $store.serp.q"),
         m("div")
             .class("spinner")
             .iff("$store.serp.loading")
@@ -421,7 +586,7 @@ fn search(params: JsValue) -> JsValue {
         // crawl
         m("div").class("answer").iff("$store.serp.crawl").kids(vec![
             m("div").class("label").child(lit("Answer")),
-            m("div").class("text").iff("$store.serp.crawl.answer").text("$store.serp.crawl.answer"),
+            m("div").class("text").iff("$store.serp.crawl.answer").inner_html("answerHtml($store.serp.crawl.answer)"),
             m("div")
                 .class("text")
                 .iff("$store.serp.crawl && !$store.serp.crawl.answer && $store.serp.crawl.labels.length")
@@ -435,12 +600,9 @@ fn search(params: JsValue) -> JsValue {
                 .iff("$store.serp.crawl.slugs.length")
                 .on("click", "$store.nav.link($event)")
                 .child(
-                    m("a")
-                        .class("chip")
+                    entity_badge("s", "s", "")
                         .for_each("s in $store.serp.crawl.slugs")
-                        .key("s")
-                        .bind("href", "'/e/' + s")
-                        .text("s"),
+                        .key("s"),
                 ),
             m("div").class("meta").text("crawlMeta($store.serp.crawl)"),
         ]),
@@ -475,12 +637,10 @@ fn search(params: JsValue) -> JsValue {
         m("div").iff("$store.serp.hits.length").kids(vec![
             m("h2").text("($store.serp.crawl ? 'Evidence' : 'Results') + ' · ' + $store.serp.hits.length"),
             m("div").class("hit").for_each("h in $store.serp.hits").key("h.slug").kids(vec![
-                m("div").class("path").text("h.slug"),
-                m("div")
-                    .class("title")
-                    .child(m("a").bind("href", "'/e/' + h.slug").text("h.label")),
-                m("div").class("snippet").iff("h.snippet").text("h.snippet"),
-                m("div").class("via").text("h.via"),
+                // A hit is a badge, not a slug line under a heading: the label
+                // is what you read, and the slug is the tooltip.
+                entity_badge("h.slug", "h.label", ""),
+                m("div").class("snippet").iff("h.snippet").inner_html("snippetHtml(h.snippet)"),
             ]),
         ]),
         m("div")
@@ -497,17 +657,14 @@ fn answer_card(key: &str, label: &str, text_expr: &str, cites_expr: &str) -> Nod
         .iff(&format!("$store.serp.{key}"))
         .kids(vec![
             m("div").class("label").child(lit(label)),
-            m("div").class("text").text(text_expr),
+            m("div").class("text").inner_html(&format!("answerHtml({text_expr})")),
             m("div")
                 .class("cites")
                 .on("click", "$store.nav.link($event)")
                 .child(
-                    m("a")
-                        .class("chip")
+                    entity_badge("s", "s", "")
                         .for_each(&format!("s in {cites_expr}"))
-                        .key("s")
-                        .bind("href", "'/e/' + s")
-                        .text("s"),
+                        .key("s"),
                 ),
         ])
 }
@@ -536,50 +693,74 @@ fn format_value(v: &JsValue) -> String {
     js::call_string(&json, "stringify", &[v.clone(), JsValue::NULL, JsValue::from_f64(1.0)])
 }
 
-fn escape(s: &str) -> String {
+/// Render a component field as escaped HTML, linkifying bare http(s) URLs.
+/// This is deliberately separate from Markdown rendering: component values are
+/// data, not author-controlled markup, so escape first and only synthesize the
+/// one safe anchor shape we need.
+fn field_html(v: &JsValue) -> String {
+    linkify_urls(&escape_html(&format_value(v)))
+}
+
+fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
+    for ch in s.chars() {
+        match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
-            c => out.push(c),
+            _ => out.push(ch),
         }
     }
     out
 }
 
-fn render_prose(text: &str) -> String {
-    text.split("\n\n")
-        .filter(|p| !p.trim().is_empty())
-        .map(|p| format!("<p>{}</p>", link_wikis(&escape(p))))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// `[[Some Entity]]` -> a link. The target is a label, so the server resolves
-/// it the same way a typed slug is resolved.
-fn link_wikis(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(at) = rest.find("[[") {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + 2..];
-        match after.find("]]") {
-            Some(end) => {
-                let name = &after[..end];
-                out.push_str(&format!(r#"<a href="/e/{name}">{name}</a>"#));
-                rest = &after[end + 2..];
+fn linkify_urls(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut cursor = 0usize;
+    while cursor < escaped.len() {
+        let rest = &escaped[cursor..];
+        let http = rest.find("https://");
+        let plain = rest.find("http://");
+        let start = match (http, plain) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(rel_start) = start else {
+            out.push_str(rest);
+            break;
+        };
+        let start = cursor + rel_start;
+        out.push_str(&escaped[cursor..start]);
+        let mut end = start;
+        while end < escaped.len() {
+            let ch = escaped[end..].chars().next().unwrap();
+            if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'') {
+                break;
             }
-            None => {
-                out.push_str(&rest[at..]);
-                return out;
+            end += ch.len_utf8();
+        }
+        // Sentence punctuation is not part of a URL when it closes a prose
+        // clause. Keep balanced URL punctuation such as query strings intact.
+        while end > start {
+            let ch = escaped[..end].chars().next_back().unwrap();
+            if matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+                end -= ch.len_utf8();
+            } else {
+                break;
             }
         }
+        let url = &escaped[start..end];
+        out.push_str("<a href=\"");
+        out.push_str(url);
+        out.push_str("\" target=\"_blank\" rel=\"noopener noreferrer\">");
+        out.push_str(url);
+        out.push_str("</a>");
+        cursor = end;
     }
-    out.push_str(rest);
     out
 }
 

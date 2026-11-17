@@ -54,7 +54,17 @@ impl Ctx {
     /// No staleness check runs — the point of opt-in is that nothing spends
     /// time detecting staleness unless it was asked to.
     pub async fn open(g: &Global) -> Result<Ctx> {
-        let brain = config::resolve(g.db.as_deref())?;
+        Ctx::open_brain(config::resolve(g.db.as_deref())?).await
+    }
+
+    /// Open a brain that has already been resolved.
+    ///
+    /// The wiki serves several at once (`/<db>/…`), and each one is a full
+    /// `Ctx`: its own T-box, its own pool on its own PostgreSQL schema, its own
+    /// model clients. Splitting this out of [`open`] keeps the resolution
+    /// policy (`--db`, `--use`, the registry) in `config` and lets a caller that
+    /// already knows which brain it wants skip it.
+    pub async fn open_brain(brain: Brain) -> Result<Ctx> {
         let schema = brain.schema_path();
         let tbox = if schema.exists() {
             TBox::load(&schema)?
@@ -130,6 +140,7 @@ pub async fn dispatch(cmd: &str, argv: &[String], g: &Global) -> Result<i32> {
         "use" => use_cmd(argv),
         "pg" => pg_cmd(argv, g).await,
         "convert" => crate::convert::run(argv, g),
+        "corpus" => crate::corpus::run(argv, g).await,
         "schema" => schema_cmd(argv, g).await,
         "def" => def_cmd(argv, g).await,
         "new" => new_cmd(argv, g).await,
